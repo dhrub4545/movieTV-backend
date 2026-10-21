@@ -1,0 +1,316 @@
+import { Movie, Series } from '../db';
+import { HomeFeed, MediaItem } from '../types';
+
+function extractYear(title: string): string {
+  const match = title.match(/\((\d{4})\)/);
+  return match ? match[1] : '2026';
+}
+
+function detectCategory(title: string, fullTitle: string = ''): string {
+  const text = `${title} ${fullTitle}`.toLowerCase();
+  if (text.includes('telugu') || text.includes('tollywood')) return 'Tollywood';
+  if (text.includes('tamil') || text.includes('kollywood')) return 'Tamil';
+  if (text.includes('punjabi')) return 'Punjabi';
+  if (text.includes('malayalam')) return 'Malayalam';
+  if (text.includes('korean') || text.includes('anime')) return 'International';
+  if (text.includes('dual audio') || text.includes('english')) return 'Hollywood (Hindi Dubbed)';
+  return 'Bollywood';
+}
+
+export function mapMovieToMediaItem(doc: any): MediaItem {
+  const year = extractYear(doc.title);
+  const cat = detectCategory(doc.title, doc.full_title);
+  const poster =
+    doc.poster_url ||
+    (doc.poster_filename
+      ? `https://image.tmdb.org/t/p/w500/${doc.poster_filename}`
+      : 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500');
+
+  return {
+    id: String(doc.id),
+    title: doc.title,
+    overview: doc.full_title || doc.title,
+    posterUrl: poster,
+    backdropUrl: poster,
+    releaseYear: year,
+    rating: 8.5,
+    type: 'movie',
+    category: cat,
+    genres: [cat, 'HD'],
+    duration: 'Full Movie',
+    streamUrl: doc.streams?.watch_raw || doc.streams?.watch_embed || undefined,
+  };
+}
+
+export function mapSeriesToMediaItem(doc: any): MediaItem {
+  const year = extractYear(doc.title);
+  const cat = detectCategory(doc.title, doc.full_title);
+  const poster =
+    doc.poster_url ||
+    'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=500';
+
+  const seasonCount = doc.seasons ? doc.seasons.length : 1;
+  const firstEp = doc.seasons?.[0]?.episodes?.[0];
+  const streamUrl = firstEp?.watch_1_raw || firstEp?.watch_1_embed || undefined;
+
+  return {
+    id: String(doc.id),
+    title: doc.title,
+    overview: doc.full_title || `${seasonCount} Season(s)`,
+    posterUrl: poster,
+    backdropUrl: poster,
+    releaseYear: year,
+    rating: 8.8,
+    type: 'tv',
+    category: 'Web Series',
+    genres: [cat, 'Series'],
+    duration: `${seasonCount} Season${seasonCount > 1 ? 's' : ''}`,
+    streamUrl,
+  };
+}
+
+export class ContentService {
+  // In-memory cache for home feed (TTL: 5 minutes)
+  private cachedHomeFeed: HomeFeed | null = null;
+  private homeFeedCacheTime = 0;
+  private readonly CACHE_TTL_MS = 5 * 60 * 1000;
+
+  // Cached total counts to avoid expensive countDocuments on every page
+  private totalMoviesCache: number | null = null;
+  private totalSeriesCache: number | null = null;
+
+  invalidateCache(): void {
+    this.cachedHomeFeed = null;
+    this.homeFeedCacheTime = 0;
+    this.totalMoviesCache = null;
+    this.totalSeriesCache = null;
+  }
+
+  async getMovies(options: {
+    page?: number;
+    limit?: number;
+    category?: string;
+    search?: string;
+  }): Promise<{ items: MediaItem[]; total: number; page: number; totalPages: number }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
+    const skip = (page - 1) * limit;
+
+    const query: any = {};
+
+    if (options.search) {
+      const q = options.search.trim();
+      query.$or = [
+        { title: { $regex: q, $options: 'i' } },
+        { full_title: { $regex: q, $options: 'i' } },
+      ];
+    } else if (options.category && options.category.toLowerCase() !== 'all') {
+      const cat = options.category.toLowerCase();
+      query.$or = [
+        { title: { $regex: cat, $options: 'i' } },
+        { full_title: { $regex: cat, $options: 'i' } },
+      ];
+    }
+
+    // Sort by createdAt: -1 so new movies appear at the very TOP of the app!
+    const findQuery = Movie.find(query)
+      .sort({ createdAt: -1, _id: -1 })
+      .select('id title full_title poster_url poster_filename streams')
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // Cache overall total if searching or filtering is not active
+    const shouldCount = options.search || options.category;
+    let total = 11182;
+
+    if (shouldCount) {
+      const [docs, count] = await Promise.all([findQuery, Movie.countDocuments(query)]);
+      total = count;
+      return {
+        items: docs.map(mapMovieToMediaItem),
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+      };
+    } else {
+      if (this.totalMoviesCache === null) {
+        this.totalMoviesCache = await Movie.countDocuments();
+      }
+      total = this.totalMoviesCache;
+      const docs = await findQuery;
+      return {
+        items: docs.map(mapMovieToMediaItem),
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+      };
+    }
+  }
+
+  async getSeries(options: {
+    page?: number;
+    limit?: number;
+    search?: string;
+  }): Promise<{ items: MediaItem[]; total: number; page: number; totalPages: number }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
+    const skip = (page - 1) * limit;
+
+    const query: any = {};
+    if (options.search) {
+      const q = options.search.trim();
+      query.$or = [
+        { title: { $regex: q, $options: 'i' } },
+        { full_title: { $regex: q, $options: 'i' } },
+      ];
+    }
+
+    // Sort by updatedAt: -1 and createdAt: -1 so new episodes or new series appear at the TOP!
+    const findQuery = Series.find(query)
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+      .select('id title full_title poster_url poster_filename seasons')
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    let total = 1282;
+    if (options.search) {
+      const [docs, count] = await Promise.all([findQuery, Series.countDocuments(query)]);
+      total = count;
+      return {
+        items: docs.map(mapSeriesToMediaItem),
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+      };
+    } else {
+      if (this.totalSeriesCache === null) {
+        this.totalSeriesCache = await Series.countDocuments();
+      }
+      total = this.totalSeriesCache;
+      const docs = await findQuery;
+      return {
+        items: docs.map(mapSeriesToMediaItem),
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+      };
+    }
+  }
+
+  async getMovieById(id: string): Promise<any | null> {
+    return Movie.findOne({ id }).lean();
+  }
+
+  async getSeriesById(id: string): Promise<any | null> {
+    return Series.findOne({ id }).lean();
+  }
+
+  /**
+   * Home Feed: In-memory cached for 5 minutes with lean projections
+   */
+  async getHomeFeed(): Promise<HomeFeed> {
+    const now = Date.now();
+    if (this.cachedHomeFeed && now - this.homeFeedCacheTime < this.CACHE_TTL_MS) {
+      return this.cachedHomeFeed;
+    }
+
+    const projection = 'id title full_title poster_url poster_filename streams';
+
+    const [latestMovies, bollywood, southDubbed, hollywood, webSeries] = await Promise.all([
+      Movie.find().sort({ createdAt: -1, _id: -1 }).select(projection).limit(20).lean(),
+      Movie.find({
+        $or: [{ full_title: /hindi/i }, { title: /hindi/i }],
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .select(projection)
+        .limit(20)
+        .lean(),
+      Movie.find({
+        $or: [
+          { full_title: /telugu|tamil|kannada|malayalam/i },
+          { title: /telugu|tamil|kannada|malayalam/i },
+        ],
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .select(projection)
+        .limit(20)
+        .lean(),
+      Movie.find({
+        $or: [{ full_title: /dual audio|english/i }, { title: /dual audio|english/i }],
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .select(projection)
+        .limit(20)
+        .lean(),
+      Series.find()
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .select('id title full_title poster_url poster_filename seasons')
+        .limit(20)
+        .lean(),
+    ]);
+
+    const latestItems = latestMovies.map(mapMovieToMediaItem);
+    const bollywoodItems = bollywood.map(mapMovieToMediaItem);
+    const southItems = southDubbed.map(mapMovieToMediaItem);
+    const hollywoodItems = hollywood.map(mapMovieToMediaItem);
+    const seriesItems = webSeries.map(mapSeriesToMediaItem);
+
+    const featured = latestItems[0] || {
+      id: '1',
+      title: 'Aryabhatt Ka Zero (2026)',
+      overview: 'Aryabhatt Ka Zero (2026) WEB-DL [Hindi DD5.1] 4K 1080p 720p & 480p',
+      posterUrl: 'https://image.tmdb.org/t/p/w500/hI5MZ78pj2aFuyEz1oOFMVsr8dM.jpg',
+      backdropUrl: 'https://image.tmdb.org/t/p/w1280/hI5MZ78pj2aFuyEz1oOFMVsr8dM.jpg',
+      releaseYear: '2026',
+      rating: 8.5,
+      type: 'movie',
+      category: 'Bollywood',
+      genres: ['Bollywood', '4K'],
+      duration: 'Full Movie',
+    };
+
+    const feed: HomeFeed = {
+      featured,
+      sections: [
+        {
+          title: '🔥 Latest DB Movies (2026 Releases)',
+          category: 'Latest',
+          type: 'movie',
+          items: latestItems,
+        },
+        {
+          title: '🎬 Bollywood & Hindi Cinema',
+          category: 'Bollywood',
+          type: 'movie',
+          items: bollywoodItems.length > 0 ? bollywoodItems : latestItems,
+        },
+        {
+          title: '🌟 South Indian & Dubbed Hits',
+          category: 'South Dubbed',
+          type: 'movie',
+          items: southItems.length > 0 ? southItems : latestItems,
+        },
+        {
+          title: '🍿 Hollywood & Dual Audio Blockbusters',
+          category: 'Hollywood',
+          type: 'movie',
+          items: hollywoodItems.length > 0 ? hollywoodItems : latestItems,
+        },
+        {
+          title: '📺 Web Series & Shows (All Episodes)',
+          category: 'Web Series',
+          type: 'tv',
+          items: seriesItems,
+        },
+      ],
+    };
+
+    this.cachedHomeFeed = feed;
+    this.homeFeedCacheTime = now;
+    return feed;
+  }
+}
+
+export const contentService = new ContentService();

@@ -1,0 +1,182 @@
+import axios from 'axios';
+import { LIVE_CHANNELS } from '../data/mockData';
+import { ChannelItem } from '../types';
+
+const DEFAULT_GITHUB_PLAYLISTS = [
+  'https://iptv-org.github.io/iptv/countries/in.m3u',
+  'https://iptv-org.github.io/iptv/languages/hin.m3u',
+];
+
+export class IptvService {
+  private channels: ChannelItem[] = [...LIVE_CHANNELS];
+  private categoryMap = new Map<string, ChannelItem[]>();
+  private lastFetchedAt: number = 0;
+  private readonly CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+  private isFetching = false;
+
+  constructor() {
+    this.rebuildCategoryIndex();
+    // Initial fetch from GitHub directly in background
+    this.refreshFromGitHub().catch(() => {});
+  }
+
+  private rebuildCategoryIndex(): void {
+    const map = new Map<string, ChannelItem[]>();
+    for (const ch of this.channels) {
+      const catKey = (ch.category || 'entertainment').toLowerCase();
+      const existing = map.get(catKey) || [];
+      existing.push(ch);
+      map.set(catKey, existing);
+    }
+    this.categoryMap = map;
+  }
+
+  /**
+   * Fetches the latest IPTV M3U playlists directly from GitHub repositories
+   */
+  async refreshFromGitHub(): Promise<void> {
+    if (this.isFetching) return;
+    this.isFetching = true;
+
+    try {
+      console.log('📡 Updating Live TV channels directly from GitHub...');
+      const targetUrls = process.env.GITHUB_IPTV_URL
+        ? [process.env.GITHUB_IPTV_URL]
+        : DEFAULT_GITHUB_PLAYLISTS;
+
+      const parsedChannels: ChannelItem[] = [];
+
+      for (const url of targetUrls) {
+        try {
+          const res = await axios.get(url, {
+            timeout: 12000,
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+            },
+          });
+
+          const items = this.parseM3U(res.data);
+          parsedChannels.push(...items);
+        } catch (err: any) {
+          console.warn(`⚠️ Failed to fetch GitHub playlist ${url}:`, err.message);
+        }
+      }
+
+      if (parsedChannels.length > 0) {
+        const seen = new Set<string>();
+        const merged: ChannelItem[] = [];
+
+        // Put curated fast channels first
+        for (const ch of LIVE_CHANNELS) {
+          seen.add(ch.name.toLowerCase());
+          merged.push(ch);
+        }
+
+        for (const ch of parsedChannels) {
+          const key = ch.name.toLowerCase();
+          if (!seen.has(key) && ch.streamUrl) {
+            seen.add(key);
+            merged.push(ch);
+          }
+        }
+
+        this.channels = merged;
+        this.rebuildCategoryIndex();
+        this.lastFetchedAt = Date.now();
+        console.log(`✅ Loaded ${this.channels.length} Live TV channels from GitHub!`);
+      }
+    } catch (err: any) {
+      console.error('❌ Error refreshing GitHub IPTV:', err.message);
+    } finally {
+      this.isFetching = false;
+    }
+  }
+
+  private parseM3U(content: string): ChannelItem[] {
+    const lines = content.split(/\r?\n/);
+    const channels: ChannelItem[] = [];
+
+    let currentMetadata: {
+      name?: string;
+      logo?: string;
+      category?: string;
+      country?: string;
+    } | null = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+
+      if (line.startsWith('#EXTINF:')) {
+        const logoMatch = line.match(/tvg-logo="([^"]+)"/i);
+        const groupMatch = line.match(/group-title="([^"]+)"/i);
+        const commaIdx = line.lastIndexOf(',');
+        const rawName = commaIdx !== -1 ? line.substring(commaIdx + 1).trim() : 'Live Channel';
+
+        let cat: any = 'Entertainment';
+        const group = (groupMatch ? groupMatch[1] : '').toLowerCase();
+        if (/sport/i.test(group) || /cricket/i.test(rawName) || /sport/i.test(rawName)) cat = 'Sports';
+        else if (/news/i.test(group) || /news/i.test(rawName)) cat = 'News';
+        else if (/movie|cinema/i.test(group) || /cinema|movie/i.test(rawName)) cat = 'Movies';
+        else if (/music/i.test(group) || /music/i.test(rawName)) cat = 'Music';
+        else if (/kid|cartoon|anim/i.test(group) || /kids/i.test(rawName)) cat = 'Kids';
+
+        currentMetadata = {
+          name: rawName,
+          logo: logoMatch ? logoMatch[1] : 'https://images.pluto.tv/channels/5ca29c9ef472141527498c11/colorLogoPNG.png',
+          category: cat,
+          country: 'India',
+        };
+      } else if (line.startsWith('http://') || line.startsWith('https://')) {
+        if (currentMetadata && currentMetadata.name) {
+          channels.push({
+            id: `git-${channels.length + 1}`,
+            name: currentMetadata.name,
+            logo: currentMetadata.logo || '',
+            category: (currentMetadata.category as any) || 'Entertainment',
+            streamUrl: line,
+            country: currentMetadata.country || 'India',
+            quality: '1080p',
+          });
+        }
+        currentMetadata = null;
+      }
+    }
+
+    return channels;
+  }
+
+  getCategories(): string[] {
+    return ['All', 'Sports', 'News', 'Movies', 'Entertainment', 'Music', 'Kids'];
+  }
+
+  getChannels(category?: string): ChannelItem[] {
+    // If cache expired, trigger background refresh
+    if (Date.now() - this.lastFetchedAt > this.CACHE_TTL_MS) {
+      this.refreshFromGitHub().catch(() => {});
+    }
+
+    if (!category || category.toLowerCase() === 'all') {
+      return this.channels;
+    }
+    const cat = category.toLowerCase();
+    return this.categoryMap.get(cat) || [];
+  }
+
+  getChannelById(id: string): ChannelItem | undefined {
+    return this.channels.find((ch) => ch.id === id);
+  }
+
+  searchChannels(query: string): ChannelItem[] {
+    if (!query) return [];
+    const q = query.toLowerCase();
+    return this.channels.filter(
+      (ch) =>
+        ch.name.toLowerCase().includes(q) ||
+        ch.category.toLowerCase().includes(q) ||
+        ch.country.toLowerCase().includes(q),
+    );
+  }
+}
+
+export const iptvService = new IptvService();
