@@ -14,6 +14,7 @@ export interface MediaItem {
   genres: string[];
   duration?: string; // e.g. "2h 15m" or "Season 1"
   streamUrl?: string; // Direct preview or pre-resolved stream if available
+  quality?: string; // 'HDCAM' | 'HD' | '4K'
   seasons?: any[];
 }
 

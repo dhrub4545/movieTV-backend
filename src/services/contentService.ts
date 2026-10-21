@@ -17,9 +17,34 @@ function detectCategory(title: string, fullTitle: string = ''): string {
   return 'Bollywood';
 }
 
+function detectQuality(title: string = '', fullTitle: string = ''): string {
+  const text = `${title} ${fullTitle}`.toLowerCase();
+  if (
+    text.includes('hdcam') ||
+    text.includes('camrip') ||
+    text.includes('cam') ||
+    text.includes('hdtc') ||
+    text.includes('hdts') ||
+    text.includes('hq-hdtc') ||
+    text.includes('pre-dvd') ||
+    text.includes('dvdscr') ||
+    text.includes('tc') ||
+    text.includes('ts') ||
+    text.includes('(line)') ||
+    text.includes('line')
+  ) {
+    return 'HDCAM';
+  }
+  if (text.includes('4k') || text.includes('2160p') || text.includes('uhd')) {
+    return '4K';
+  }
+  return 'HD';
+}
+
 export function mapMovieToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
   const cat = detectCategory(doc.title, doc.full_title);
+  const quality = detectQuality(doc.title, doc.full_title);
   let poster =
     doc.poster_url ||
     (doc.poster_filename
@@ -41,6 +66,7 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     category: cat,
     genres: [cat, 'HD'],
     duration: 'Full Movie',
+    quality,
     streamUrl: undefined,
   };
 }
@@ -51,6 +77,7 @@ const ADULT_REGEX =
 export function mapSeriesToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
   const cat = detectCategory(doc.title, doc.full_title);
+  const quality = detectQuality(doc.title, doc.full_title);
   let poster =
     doc.poster_url ||
     (doc.poster_filename
@@ -75,6 +102,7 @@ export function mapSeriesToMediaItem(doc: any): MediaItem {
     category: 'Web Series',
     genres: [cat, 'Series'],
     duration: `${seasonCount} Season${seasonCount > 1 ? 's' : ''}`,
+    quality,
     streamUrl,
     seasons: doc.seasons || [],
   };
