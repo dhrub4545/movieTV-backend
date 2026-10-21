@@ -368,7 +368,7 @@ export class ScraperPipelineService {
       for (const item of discoveredItems) {
         try {
           const isAdult =
-            /\b18\+|\b18\s*\+|adult|erotic|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i.test(
+            /\b18\+|\b18\s*\+|adult|erotic|sex|\bhot\b|sensual|softcore|hotshots|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i.test(
               `${item.displayName} ${item.fullTitle}`,
             );
           if (isAdult) {
@@ -377,13 +377,16 @@ export class ScraperPipelineService {
           }
 
           // 1. FAST DB CHECK: Check if item is already saved as a Movie
-          const inMovie = await Movie.exists({
+          const inMovie = await Movie.findOne({
             $or: [{ movie_page_url: item.pageUrl }, { title: item.displayName }],
           });
 
           if (inMovie) {
+            inMovie.updatedAt = new Date();
+            if (item.posterUrl && !inMovie.poster_url) inMovie.poster_url = item.posterUrl;
+            await inMovie.save();
             skippedCount++;
-            continue; // Already in DB -> SKIP!
+            continue; // Already in DB -> Updated timestamp and continue!
           }
 
           // 2. FAST DB CHECK: Check if item is already saved as a Series

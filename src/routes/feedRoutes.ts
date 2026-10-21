@@ -13,6 +13,20 @@ feedRouter.get('/home', async (_req, res) => {
   }
 });
 
+// GET /api/feed/latest?page=1&limit=40&search=...
+feedRouter.get('/latest', async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 40;
+    const search = req.query.search as string | undefined;
+
+    const result = await contentService.getLatestFeed({ page, limit, search });
+    res.json(result.items);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch latest feed', message: err.message });
+  }
+});
+
 // GET /api/feed/movies?category=...&page=1&limit=40&search=...
 feedRouter.get('/movies', async (req, res) => {
   try {

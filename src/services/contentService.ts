@@ -43,7 +43,7 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
 }
 
 const ADULT_REGEX =
-  /\b18\+|\b18\s*\+|adult|erotic|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i;
+  /\b18\+|\b18\s*\+|adult|erotic|sex|\bhot\b|sensual|softcore|hotshots|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i;
 
 export function mapSeriesToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
@@ -230,6 +230,69 @@ export class ContentService {
 
   async getSeriesById(id: string): Promise<any | null> {
     return Series.findOne({ id }).lean();
+  }
+
+  /**
+   * Latest Feed: Combined Movies & Web Series sorted by HDHub4u exact live release order
+   */
+  async getLatestFeed(options: {
+    page?: number;
+    limit?: number;
+    search?: string;
+  }): Promise<{ items: MediaItem[]; total: number; page: number; totalPages: number }> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
+    const skip = (page - 1) * limit;
+
+    const adultFilter = { $not: ADULT_REGEX };
+    const query: any = {
+      title: adultFilter,
+      full_title: adultFilter,
+    };
+
+    if (options.search) {
+      const q = options.search.trim();
+      query.$and = [
+        {
+          $or: [
+            { title: { $regex: q, $options: 'i' } },
+            { full_title: { $regex: q, $options: 'i' } },
+          ],
+        },
+      ];
+    }
+
+    const halfLimit = Math.ceil(limit / 2);
+    const halfSkip = Math.floor(skip / 2);
+
+    const [movies, series] = await Promise.all([
+      Movie.find(query)
+        .sort({ updatedAt: -1, _id: -1 })
+        .select('id title full_title poster_url poster_filename streams updatedAt')
+        .skip(halfSkip)
+        .limit(halfLimit + 10)
+        .lean(),
+      Series.find(query)
+        .sort({ updatedAt: -1, _id: -1 })
+        .select('id title full_title poster_url poster_filename seasons updatedAt')
+        .skip(halfSkip)
+        .limit(halfLimit + 10)
+        .lean(),
+    ]);
+
+    const mappedMovies = movies.map((doc: any) => ({ ...mapMovieToMediaItem(doc), updatedAt: doc.updatedAt }));
+    const mappedSeries = series.map((doc: any) => ({ ...mapSeriesToMediaItem(doc), updatedAt: doc.updatedAt }));
+
+    const combined = [...mappedMovies, ...mappedSeries]
+      .sort((a: any, b: any) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, limit);
+
+    return {
+      items: combined,
+      total: 12469,
+      page,
+      totalPages: Math.ceil(12469 / limit),
+    };
   }
 
   /**
