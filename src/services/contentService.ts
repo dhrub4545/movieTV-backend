@@ -20,11 +20,14 @@ function detectCategory(title: string, fullTitle: string = ''): string {
 export function mapMovieToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
   const cat = detectCategory(doc.title, doc.full_title);
-  const poster =
+  let poster =
     doc.poster_url ||
     (doc.poster_filename
-      ? `https://image.tmdb.org/t/p/w500/${doc.poster_filename}`
-      : 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500');
+      ? `https://image.tmdb.org/t/p/w342/${doc.poster_filename}`
+      : 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=400');
+  if (poster && poster.includes('/w500/')) {
+    poster = poster.replace('/w500/', '/w342/');
+  }
 
   return {
     id: String(doc.id),
@@ -48,9 +51,14 @@ const ADULT_REGEX =
 export function mapSeriesToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
   const cat = detectCategory(doc.title, doc.full_title);
-  const poster =
+  let poster =
     doc.poster_url ||
-    'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=500';
+    (doc.poster_filename
+      ? `https://image.tmdb.org/t/p/w342/${doc.poster_filename}`
+      : 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=400');
+  if (poster && poster.includes('/w500/')) {
+    poster = poster.replace('/w500/', '/w342/');
+  }
 
   const seasonCount = doc.seasons ? doc.seasons.length : 1;
   const firstEp = doc.seasons?.[0]?.episodes?.[0];
