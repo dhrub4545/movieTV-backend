@@ -106,10 +106,12 @@ export interface ScraperStatus {
   nextRunAt: string | null;
   totalNewMoviesAdded: number;
   totalNewSeriesAdded: number;
+  totalMoviesUpdated: number;
   totalEpisodesUpdated: number;
   lastRunResult: {
     scannedItems: number;
     newMovies: number;
+    updatedMovies: number;
     newSeries: number;
     updatedSeriesEpisodes: number;
     skippedExisting: number;
@@ -126,6 +128,7 @@ export class ScraperPipelineService {
 
   private totalNewMoviesAdded = 0;
   private totalNewSeriesAdded = 0;
+  private totalMoviesUpdated = 0;
   private totalEpisodesUpdated = 0;
 
   private lastRunResult: ScraperStatus['lastRunResult'] = null;
@@ -271,6 +274,7 @@ export class ScraperPipelineService {
       nextRunAt: this.nextRunAt?.toISOString() || null,
       totalNewMoviesAdded: this.totalNewMoviesAdded,
       totalNewSeriesAdded: this.totalNewSeriesAdded,
+      totalMoviesUpdated: this.totalMoviesUpdated,
       totalEpisodesUpdated: this.totalEpisodesUpdated,
       lastRunResult: this.lastRunResult,
     };
@@ -279,9 +283,10 @@ export class ScraperPipelineService {
   /**
    * Main pipeline execution:
    * 1. Fetches latest releases from page 1 and page 2.
-   * 2. Checks MongoDB - SKIPS any movie or webseries already in DB.
-   * 3. For series already in DB, checks if new episodes were uploaded and appends them.
-   * 4. For new items, parses stream links & pushes to DB with createdAt/updatedAt = now (TOP OF FEED).
+   * 2. Checks MongoDB:
+   *    - For existing Movies: Fetches detail page and REPLACES old stream links with updated scraped links!
+   *    - For existing Series: Checks if new episodes were uploaded or episode stream links were updated.
+   * 3. For new items, parses stream links & pushes to DB with createdAt/updatedAt = now (TOP OF FEED).
    */
   async runPipeline(): Promise<void> {
     if (this.isRunning) {
@@ -296,6 +301,7 @@ export class ScraperPipelineService {
 
     let scannedCount = 0;
     let newMoviesCount = 0;
+    let updatedMoviesCount = 0;
     let newSeriesCount = 0;
     let updatedEpisodesCount = 0;
     let skippedCount = 0;
@@ -376,45 +382,92 @@ export class ScraperPipelineService {
             continue; // Filter out 18+ adult content from scraper!
           }
 
-          // 1. FAST DB CHECK: Check if item is already saved as a Movie
+          // 1. DB CHECK: Check if item is already saved as a Movie
           const inMovie = await Movie.findOne({
             $or: [{ movie_page_url: item.pageUrl }, { title: item.displayName }],
           });
 
           if (inMovie) {
+            // Movie is already in DB -> Fetch detail page and REPLACE old stream links with newly scraped links!
+            const detailHtml = await this.fetchDetailPage(item.pageUrl);
+            let updatedStream = false;
+
+            if (detailHtml) {
+              const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
+              if (parsed.streams) {
+                const newEmbed = (parsed.streams.watch_embed || '').trim();
+                const newRaw = (parsed.streams.watch_raw || '').trim();
+                const newPlayer2 = (parsed.streams.player_2 || '').trim();
+
+                const oldEmbed = inMovie.streams?.watch_embed || '';
+                const oldRaw = inMovie.streams?.watch_raw || '';
+                const oldPlayer2 = inMovie.streams?.player_2 || '';
+
+                const hasNewLinks = newEmbed.length > 0 || newPlayer2.length > 0;
+                const isChanged = Boolean(
+                  (newEmbed && newEmbed !== oldEmbed) ||
+                  (newPlayer2 && newPlayer2 !== oldPlayer2) ||
+                  (newRaw && newRaw !== oldRaw),
+                );
+
+                if (hasNewLinks) {
+                  if (!inMovie.streams) {
+                    inMovie.streams = {};
+                  }
+                  // Replace old stream links with the updated stream links
+                  if (newEmbed) inMovie.streams.watch_embed = newEmbed;
+                  if (newPlayer2) inMovie.streams.player_2 = newPlayer2;
+                  if (newRaw) inMovie.streams.watch_raw = newRaw;
+
+                  inMovie.markModified('streams');
+                  updatedStream = isChanged;
+                }
+              }
+            }
+
             inMovie.updatedAt = new Date();
             if (item.posterUrl && !inMovie.poster_url) inMovie.poster_url = item.posterUrl;
+            if (item.fullTitle && inMovie.full_title !== item.fullTitle) inMovie.full_title = item.fullTitle;
+            if (item.pageUrl && inMovie.movie_page_url !== item.pageUrl) inMovie.movie_page_url = item.pageUrl;
+
             await inMovie.save();
-            skippedCount++;
-            continue; // Already in DB -> Updated timestamp and continue!
+
+            if (updatedStream) {
+              updatedMoviesCount++;
+              this.totalMoviesUpdated++;
+              console.log(
+                `🔄 [UPDATED MOVIE STREAM] ${inMovie.title}: Replaced old stream link with updated links -> Pushed to TOP!`,
+              );
+            } else {
+              skippedCount++;
+            }
+            continue;
           }
 
-          // 2. FAST DB CHECK: Check if item is already saved as a Series
+          // 2. DB CHECK: Check if item is already saved as a Series
           const existingSeries = await Series.findOne({
             $or: [{ movie_page_url: item.pageUrl }, { title: item.displayName }],
           });
 
           if (existingSeries) {
-            // Check if post has new episodes (e.g. "[EP-06 Added]" or more episodes than in DB)
-            const isEpisodeUpdate =
-              /EP-?\d+\s*Added|Episode\s*\d+\s*Added/i.test(item.fullTitle) ||
-              item.isSeriesCandidate;
-
-            if (isEpisodeUpdate) {
-              const detailHtml = await this.fetchDetailPage(item.pageUrl);
-              if (detailHtml) {
-                const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
-                if (parsed.type === 'series' && parsed.seasons) {
-                  const addedCount = this.mergeNewEpisodes(existingSeries, parsed.seasons);
-                  if (addedCount > 0) {
-                    existingSeries.updatedAt = new Date(); // Push to TOP of series!
-                    await existingSeries.save();
-                    updatedEpisodesCount += addedCount;
-                    console.log(
-                      `✨ [UPDATED SERIES] ${existingSeries.title}: Added ${addedCount} new episode(s) -> Pushed to TOP!`,
-                    );
-                    continue;
-                  }
+            // Check if series has new episodes or updated episode stream links
+            const detailHtml = await this.fetchDetailPage(item.pageUrl);
+            if (detailHtml) {
+              const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
+              if (parsed.type === 'series' && parsed.seasons) {
+                const updatedCount = this.mergeNewEpisodes(existingSeries, parsed.seasons);
+                if (updatedCount > 0) {
+                  existingSeries.updatedAt = new Date(); // Push to TOP of series!
+                  if (item.posterUrl && !existingSeries.poster_url) existingSeries.poster_url = item.posterUrl;
+                  if (item.fullTitle && existingSeries.full_title !== item.fullTitle) existingSeries.full_title = item.fullTitle;
+                  if (item.pageUrl && existingSeries.movie_page_url !== item.pageUrl) existingSeries.movie_page_url = item.pageUrl;
+                  existingSeries.markModified('seasons');
+                  await existingSeries.save();
+                  updatedEpisodesCount += updatedCount;
+                  console.log(
+                    `✨ [UPDATED SERIES] ${existingSeries.title}: Updated ${updatedCount} episode(s) / stream link(s) -> Pushed to TOP!`,
+                  );
+                  continue;
                 }
               }
             }
@@ -476,8 +529,8 @@ export class ScraperPipelineService {
         }
       }
 
-      // If new movies/series or new episodes were added, clear cache so app sees them immediately
-      if (newMoviesCount > 0 || newSeriesCount > 0 || updatedEpisodesCount > 0) {
+      // If new movies/series or updated stream links were added, clear cache so app sees them immediately
+      if (newMoviesCount > 0 || updatedMoviesCount > 0 || newSeriesCount > 0 || updatedEpisodesCount > 0) {
         if (this.contentService) {
           this.contentService.invalidateCache();
         }
@@ -493,6 +546,7 @@ export class ScraperPipelineService {
       this.lastRunResult = {
         scannedItems: scannedCount,
         newMovies: newMoviesCount,
+        updatedMovies: updatedMoviesCount,
         newSeries: newSeriesCount,
         updatedSeriesEpisodes: updatedEpisodesCount,
         skippedExisting: skippedCount,
@@ -503,7 +557,7 @@ export class ScraperPipelineService {
       console.log(
         `✅ [Scraper Pipeline] Completed in ${(durationMs / 1000).toFixed(1)}s: ` +
           `Scanned: ${scannedCount} | Skipped: ${skippedCount} | ` +
-          `New Movies: ${newMoviesCount} | New Series: ${newSeriesCount} | Updated Episodes: ${updatedEpisodesCount}`,
+          `New Movies: ${newMoviesCount} | Updated Movies: ${updatedMoviesCount} | New Series: ${newSeriesCount} | Updated Episodes: ${updatedEpisodesCount}`,
       );
       console.log(`⏰ Next scheduled run at: ${this.nextRunAt.toISOString()}`);
       console.log('===============================================================\n');
@@ -520,7 +574,7 @@ export class ScraperPipelineService {
   }
 
   private mergeNewEpisodes(existingSeries: any, newSeasons: any[]): number {
-    let addedCount = 0;
+    let updatedCount = 0;
     if (!existingSeries.seasons) {
       existingSeries.seasons = [];
     }
@@ -532,24 +586,47 @@ export class ScraperPipelineService {
 
       if (!existingS) {
         existingSeries.seasons.push(newS);
-        addedCount += (newS.episodes || []).length;
+        updatedCount += (newS.episodes || []).length;
         continue;
       }
 
       for (const newEp of newS.episodes || []) {
-        const epExists = (existingS.episodes || []).some(
+        const existingEp = (existingS.episodes || []).find(
           (e: any) => e.episode?.toLowerCase() === newEp.episode?.toLowerCase(),
         );
 
-        if (!epExists) {
+        if (!existingEp) {
           existingS.episodes.push(newEp);
           existingS.total_episodes = existingS.episodes.length;
-          addedCount++;
+          updatedCount++;
+        } else {
+          // Replace old episode stream links if updated links were scraped
+          let epChanged = false;
+          const newEmb = (newEp.watch_1_embed || '').trim();
+          const newP2 = (newEp.watch_2 || '').trim();
+          const newRaw = (newEp.watch_1_raw || '').trim();
+
+          if (newEmb && newEmb !== existingEp.watch_1_embed) {
+            existingEp.watch_1_embed = newEmb;
+            epChanged = true;
+          }
+          if (newP2 && newP2 !== existingEp.watch_2) {
+            existingEp.watch_2 = newP2;
+            epChanged = true;
+          }
+          if (newRaw && newRaw !== existingEp.watch_1_raw) {
+            existingEp.watch_1_raw = newRaw;
+            epChanged = true;
+          }
+
+          if (epChanged) {
+            updatedCount++;
+          }
         }
       }
     }
 
-    return addedCount;
+    return updatedCount;
   }
 
   private async parseMovieOrSeries(
