@@ -9,7 +9,7 @@
   "crons": [
     {
       "path": "/api/scraper/trigger",
-      "schedule": "*/10 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
