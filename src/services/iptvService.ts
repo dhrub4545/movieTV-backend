@@ -3,6 +3,11 @@ import { LIVE_CHANNELS } from '../data/mockData';
 import { ChannelItem } from '../types';
 
 const DEFAULT_GITHUB_PLAYLISTS = [
+  'https://iptv-org.github.io/iptv/categories/sports.m3u',
+  'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us.m3u',
+  'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/in.m3u',
+  'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/pk.m3u',
+  'https://raw.githubusercontent.com/iptv-org/iptv/master/streams/au.m3u',
   'https://iptv-org.github.io/iptv/countries/in.m3u',
   'https://iptv-org.github.io/iptv/languages/hin.m3u',
 ];
@@ -41,7 +46,7 @@ export class IptvService {
     try {
       console.log('📡 Updating Live TV channels directly from GitHub...');
       const targetUrls = process.env.GITHUB_IPTV_URL
-        ? [process.env.GITHUB_IPTV_URL]
+        ? [process.env.GITHUB_IPTV_URL, ...DEFAULT_GITHUB_PLAYLISTS]
         : DEFAULT_GITHUB_PLAYLISTS;
 
       const parsedChannels: ChannelItem[] = [];
@@ -102,6 +107,7 @@ export class IptvService {
       logo?: string;
       category?: string;
       country?: string;
+      quality?: string;
     } | null = null;
 
     for (let i = 0; i < lines.length; i++) {
@@ -115,17 +121,45 @@ export class IptvService {
 
         let cat: any = 'Entertainment';
         const group = (groupMatch ? groupMatch[1] : '').toLowerCase();
-        if (/sport/i.test(group) || /cricket/i.test(rawName) || /sport/i.test(rawName)) cat = 'Sports';
+        
+        // Comprehensive sports & cricket detection so Willow, Star Sports, Sony Ten, etc. go to Sports
+        const isSportOrCricket =
+          /sport|cricket|willow|star sports|sony ten|ten sports|ten cricket|ptv sports|sky sports|supersport|astro cricket|t sports/i.test(group) ||
+          /sport|cricket|willow|star sports|sony ten|ten sports|ten cricket|ptv sports|sky sports|supersport|astro cricket|t sports/i.test(rawName);
+
+        if (isSportOrCricket) cat = 'Sports';
         else if (/news/i.test(group) || /news/i.test(rawName)) cat = 'News';
         else if (/movie|cinema/i.test(group) || /cinema|movie/i.test(rawName)) cat = 'Movies';
         else if (/music/i.test(group) || /music/i.test(rawName)) cat = 'Music';
         else if (/kid|cartoon|anim/i.test(group) || /kids/i.test(rawName)) cat = 'Kids';
 
+        let defaultLogo = 'https://images.pluto.tv/channels/5ca29c9ef472141527498c11/colorLogoPNG.png';
+        if (/willow/i.test(rawName)) {
+          defaultLogo = 'https://cricket.willow.tv/_nuxt/img/willow_blue_logo.362ed8e.png';
+        } else if (/cricket gold/i.test(rawName)) {
+          defaultLogo = 'https://resources.cricket-australia.pulselive.com/cricket-australia/photo/2025/07/25/836eddae-4329-4542-ad17-dcd37e9d951a/Cricket-Gold-1920x1080_noBG.png';
+        } else if (/star sports/i.test(rawName)) {
+          defaultLogo = 'https://xstreamcp-assets-msp.streamready.in/assets/LIVETV/LIVECHANNEL/LIVETV_LIVETVCHANNEL_STAR_SPORTS_2/images/LOGO_HD/image.png';
+        } else if (/sony.*ten/i.test(rawName)) {
+          defaultLogo = 'https://xstreamcp-assets-msp.streamready.in/assets/LIVETV/LIVECHANNEL/LIVETV_LIVETVCHANNEL_SONY_SPORTS_TEN_1/images/LOGO_HD/image.png';
+        }
+
+        let qual = 'HD';
+        if (/1080p/i.test(rawName) || /1080/i.test(rawName)) qual = '1080p';
+        else if (/720p/i.test(rawName) || /720/i.test(rawName)) qual = '720p';
+        else if (/576p|480p|sd/i.test(rawName)) qual = 'SD';
+
+        let cty = 'India';
+        if (/willow/i.test(rawName)) cty = 'USA';
+        else if (/ptv sports|ten sports pakistan/i.test(rawName)) cty = 'Pakistan';
+        else if (/cricket gold/i.test(rawName)) cty = 'Australia';
+
         currentMetadata = {
           name: rawName,
-          logo: logoMatch ? logoMatch[1] : 'https://images.pluto.tv/channels/5ca29c9ef472141527498c11/colorLogoPNG.png',
+          logo: logoMatch ? logoMatch[1] : defaultLogo,
           category: cat,
-          country: 'India',
+          country: cty,
+          quality: qual,
         };
       } else if (line.startsWith('http://') || line.startsWith('https://')) {
         if (currentMetadata && currentMetadata.name) {
@@ -136,7 +170,7 @@ export class IptvService {
             category: (currentMetadata.category as any) || 'Entertainment',
             streamUrl: line,
             country: currentMetadata.country || 'India',
-            quality: '1080p',
+            quality: currentMetadata.quality || '1080p',
           });
         }
         currentMetadata = null;

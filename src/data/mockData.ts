@@ -251,7 +251,115 @@ export const WEB_SERIES: MediaItem[] = [
 ];
 
 export const LIVE_CHANNELS: ChannelItem[] = [
-  // --- SPORTS ---
+  // --- SPORTS & CRICKET ---
+  {
+    id: 'cricket-willow-hd',
+    name: 'Willow Sports HD (Cricket)',
+    logo: 'https://cricket.willow.tv/_nuxt/img/willow_blue_logo.362ed8e.png',
+    category: 'Sports',
+    streamUrl: 'https://d36r8jifhgsk5j.cloudfront.net/Willow_TV1080p.m3u8',
+    country: 'USA / Global',
+    quality: '1080p'
+  },
+  {
+    id: 'cricket-willow-live',
+    name: 'Willow Cricket Live',
+    logo: 'https://provider-static.plex.tv/epg/cms/production/acf3d1d8-c53e-49ca-86e9-0d9410b106b4/Willow_Sports_dark_Background_1500_1000_color.png',
+    category: 'Sports',
+    streamUrl: 'https://d36r8jifhgsk5j.cloudfront.net/Willow_TV.m3u8',
+    country: 'USA / India',
+    quality: '720p'
+  },
+  {
+    id: 'cricket-gold-hd',
+    name: 'Cricket Gold (24/7 Cricket HD)',
+    logo: 'https://resources.cricket-australia.pulselive.com/cricket-australia/photo/2025/07/25/836eddae-4329-4542-ad17-dcd37e9d951a/Cricket-Gold-1920x1080_noBG.png',
+    category: 'Sports',
+    streamUrl: 'https://streams2.sofast.tv/ptnr-yupptv/title-cricketgold/v1/master/611d79b11b77e2f571934fd80ca1413453772ac7/b2048bb8-1686-4432-aa50-647245383e0c/manifest.m3u8',
+    country: 'Australia / Global',
+    quality: '1080p'
+  },
+  {
+    id: 'cricket-sony-ten-1-hd',
+    name: 'Sony Sports Ten 1 HD',
+    logo: 'https://xstreamcp-assets-msp.streamready.in/assets/LIVETV/LIVECHANNEL/LIVETV_LIVETVCHANNEL_SONY_SPORTS_TEN_1/images/LOGO_HD/image.png',
+    category: 'Sports',
+    streamUrl: 'http://103.185.24.134:3001/SonyTenSports1/index.m3u8',
+    country: 'India',
+    quality: '1080p'
+  },
+  {
+    id: 'cricket-sony-ten-2',
+    name: 'Sony Sports Ten 2',
+    logo: 'https://xstreamcp-assets-msp.streamready.in/assets/LIVETV/LIVECHANNEL/LIVETV_LIVETVCHANNEL_SONY_SPORTS_TEN_2/images/LOGO_HD/image.png',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a01b/index.m3u8?hls',
+    country: 'India',
+    quality: '720p'
+  },
+  {
+    id: 'cricket-sony-ten-3-hindi',
+    name: 'Sony Sports Ten 3 Hindi',
+    logo: 'https://dtil.tmsimg.com/assets/GNLZZGG0025TCMR.png?lock=720x540',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a01t/index.m3u8?hls',
+    country: 'India',
+    quality: '720p'
+  },
+  {
+    id: 'cricket-sony-ten-5',
+    name: 'Sony Sports Ten 5',
+    logo: 'https://xstreamcp-assets-msp.streamready.in/assets/LIVETV/LIVECHANNEL/LIVETV_LIVETVCHANNEL_SONY_SPORTS_TEN_5/images/LOGO_HD/image.png',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a028/index.m3u8?hls',
+    country: 'India',
+    quality: '720p'
+  },
+  {
+    id: 'cricket-star-sports-select1',
+    name: 'Star Sports Select 1 HD',
+    logo: 'https://i.imgur.com/Mh9tKPx.png',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a026/index.m3u8?hls',
+    country: 'India',
+    quality: '1080p'
+  },
+  {
+    id: 'cricket-star-sports-select2',
+    name: 'Star Sports Select 2 HD',
+    logo: 'https://i.imgur.com/FtRT73R.png',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a027/index.m3u8?hls',
+    country: 'India',
+    quality: '1080p'
+  },
+  {
+    id: 'cricket-star-sports-2',
+    name: 'Star Sports 2',
+    logo: 'https://xstreamcp-assets-msp.streamready.in/assets/LIVETV/LIVECHANNEL/LIVETV_LIVETVCHANNEL_STAR_SPORTS_2/images/LOGO_HD/image.png',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a00v/index.m3u8?hls',
+    country: 'India',
+    quality: '720p'
+  },
+  {
+    id: 'cricket-ten-cricket',
+    name: 'Ten Cricket Live',
+    logo: 'https://i.imgur.com/K5XIFuW.png',
+    category: 'Sports',
+    streamUrl: 'http://103.151.60.162:2122/play/a0fj/index.m3u8?hls',
+    country: 'India / Asia',
+    quality: '720p'
+  },
+  {
+    id: 'cricket-ptv-sports',
+    name: 'PTV Sports Live (Cricket)',
+    logo: 'https://i.imgur.com/CPm6GHA.png',
+    category: 'Sports',
+    streamUrl: 'http://103.250.28.74:8000/play/a019/index.m3u8',
+    country: 'Pakistan',
+    quality: '1080p'
+  },
   {
     id: 'sports-1',
     name: 'Red Bull TV (Live Sports)',
