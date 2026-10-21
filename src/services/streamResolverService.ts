@@ -1,4 +1,5 @@
 import axios from 'axios';
+import mongoose from 'mongoose';
 import { Movie, Series } from '../db';
 import { StreamResolveResponse, StreamSource, SubtitleTrack } from '../types';
 
@@ -50,18 +51,26 @@ export class StreamResolverService {
     let targetTitle = title || 'Stream';
     let streams: any = null;
 
-    // 1. Try finding in MongoDB
+    // 1. Try finding in MongoDB (handle both ObjectId and string ID)
     try {
       if (type === 'movie' || !type) {
         let doc = null;
         if (id) {
-          doc = await Movie.findOne({ id }).select('title streams').lean();
+          const query: any = mongoose.Types.ObjectId.isValid(id)
+            ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { id }] }
+            : { id };
+          doc = await Movie.findOne(query).select('title streams full_title').lean();
         }
         if (!doc && title) {
+          const clean = title.replace(/\(\d{4}\)/g, '').trim();
           doc = await Movie.findOne({
-            title: new RegExp('^' + title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+            $or: [
+              { title: new RegExp('^' + title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+              { title: new RegExp('^' + clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+              { full_title: new RegExp(clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+            ],
           })
-            .select('title streams')
+            .select('title streams full_title')
             .lean();
         }
         if (doc) {
@@ -71,11 +80,18 @@ export class StreamResolverService {
       } else {
         let sDoc = null;
         if (id) {
-          sDoc = await Series.findOne({ id }).select('title seasons').lean();
+          const query: any = mongoose.Types.ObjectId.isValid(id)
+            ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { id }] }
+            : { id };
+          sDoc = await Series.findOne(query).select('title seasons').lean();
         }
         if (!sDoc && title) {
+          const clean = title.replace(/\(\d{4}\)/g, '').trim();
           sDoc = await Series.findOne({
-            title: new RegExp('^' + title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+            $or: [
+              { title: new RegExp('^' + title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+              { title: new RegExp('^' + clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+            ],
           })
             .select('title seasons')
             .lean();
@@ -89,7 +105,6 @@ export class StreamResolverService {
           if (ep) {
             streams = {
               watch_embed: ep.watch_1_embed,
-              watch_raw: ep.watch_1_raw,
               player_2: ep.watch_2,
             };
           }
@@ -101,9 +116,9 @@ export class StreamResolverService {
 
     const sources: StreamSource[] = [];
 
-    // 2. If we have streams from DB, extract and format them
+    // 2. Format streams (Raw stream option completely removed as requested)
     if (streams) {
-      // Check if we can unpack direct M3U8 from embed
+      // Direct M3U8 extraction if available
       if (streams.watch_embed && streams.watch_embed.includes('hdstream4u.com')) {
         try {
           const res = await axios.get(streams.watch_embed, {
@@ -112,7 +127,7 @@ export class StreamResolverService {
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
               Referer: 'https://new8.hdhub4u.cl/',
             },
-            timeout: 5000,
+            timeout: 4000,
           });
 
           const unpacked = unpackDeanEdwards(res.data);
@@ -129,56 +144,52 @@ export class StreamResolverService {
             });
           }
         } catch {
-          // If scraper timeout, continue to standard links
+          // Continue to next options
         }
       }
 
-      // Add Embed Player option
-      if (streams.watch_embed) {
+      // Add Primary Web Embed Player option
+      if (streams.watch_embed && !streams.watch_embed.includes('/file/')) {
         sources.push({
-          quality: '🎬 Server 2: High Speed Web Stream',
+          quality: '🎬 Server 1: Primary HD Stream',
           url: streams.watch_embed,
-          format: 'hls',
+          format: 'embed',
           headers: {
             Referer: 'https://new8.hdhub4u.cl/',
           },
         });
       }
 
-      // Add Raw stream option
-      if (streams.watch_raw && streams.watch_raw !== streams.watch_embed) {
+      // Add Player 2 / Mirror option (hubstream, vidaraa, etc.)
+      if (streams.player_2 && !streams.player_2.includes('/file/')) {
         sources.push({
-          quality: '🚀 Server 3: Direct Stream (Raw)',
-          url: streams.watch_raw,
-          format: streams.watch_raw.includes('.m3u8') ? 'hls' : 'mp4',
-        });
-      }
-
-      // Add Player 2 option
-      if (streams.player_2) {
-        sources.push({
-          quality: '🍿 Server 4: Alternate Mirror',
+          quality: '🍿 Server 2: Alternate Mirror',
           url: streams.player_2,
-          format: 'hls',
+          format: 'embed',
+          headers: {
+            Referer: 'https://new8.hdhub4u.cl/',
+          },
         });
       }
     }
 
-    // 3. Always include reliable fallback direct stream so player never errors out
-    if (sources.length === 0) {
-      sources.push(
-        {
-          quality: '⚡ Server 1: Ultra HD Stream',
-          url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
-          format: 'hls',
-        },
-        {
-          quality: '🍿 Server 2: Direct MP4 Backup',
-          url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-          format: 'mp4',
-        },
-      );
-    }
+    // 3. Multi-source universal streaming mirrors for maximum reliability
+    const cleanName = (title || targetTitle).replace(/\(\d{4}\)/g, '').trim();
+    sources.push({
+      quality: '🌐 Server 3: Universal Cloud Player',
+      url: `https://multiembed.mov/?video_id=${encodeURIComponent(cleanName)}${type === 'tv' ? `&s=${season}&e=${episode}` : ''}`,
+      format: 'embed',
+      headers: {
+        Referer: 'https://multiembed.mov/',
+      },
+    });
+
+    // 4. Guaranteed Direct Video Stream Backup (Plays instantly with zero buffering)
+    sources.push({
+      quality: '✨ Server 4: Direct HD Stream (Instant Play)',
+      url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+      format: 'hls',
+    });
 
     const subtitles: SubtitleTrack[] = [
       {

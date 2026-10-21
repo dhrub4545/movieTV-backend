@@ -41,7 +41,7 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     category: cat,
     genres: [cat, 'HD'],
     duration: 'Full Movie',
-    streamUrl: doc.streams?.watch_raw || doc.streams?.watch_embed || undefined,
+    streamUrl: undefined,
   };
 }
 
@@ -61,8 +61,7 @@ export function mapSeriesToMediaItem(doc: any): MediaItem {
   }
 
   const seasonCount = doc.seasons ? doc.seasons.length : 1;
-  const firstEp = doc.seasons?.[0]?.episodes?.[0];
-  const streamUrl = firstEp?.watch_1_raw || firstEp?.watch_1_embed || undefined;
+  const streamUrl = undefined;
 
   return {
     id: String(doc.id),

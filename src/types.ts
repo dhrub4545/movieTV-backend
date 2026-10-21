@@ -41,7 +41,7 @@ export interface ChannelItem {
 export interface StreamSource {
   quality: string; // '1080p', '720p', '4K', 'Auto'
   url: string;
-  format: 'hls' | 'mp4' | 'dash';
+  format: 'hls' | 'mp4' | 'dash' | 'embed';
   headers?: Record<string, string>;
 }
 
