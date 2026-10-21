@@ -9,14 +9,35 @@ channelRouter.get('/categories', (_req, res) => {
   res.json({ categories });
 });
 
-// GET /api/channels?category=Sports
-channelRouter.get('/', (req, res) => {
+// GET /api/channels/refresh or POST /api/channels/refresh
+channelRouter.all('/refresh', async (_req, res) => {
+  await iptvService.refreshFromGitHub(true);
+  const channels = iptvService.getChannels();
+  res.json({
+    success: true,
+    message: 'Channels synced with GitHub in real time',
+    total: channels.length,
+    commitSha: iptvService.getLastCommitSha(),
+    refreshedAt: iptvService.getLastFetchedAt(),
+  });
+});
+
+// GET /api/channels?category=Sports&refresh=true
+channelRouter.get('/', async (req, res) => {
   const category = req.query.category as string | undefined;
+  const forceRefresh = req.query.refresh === 'true';
+
+  if (forceRefresh) {
+    await iptvService.refreshFromGitHub(true);
+  }
+
   const channels = iptvService.getChannels(category);
   res.json({
     total: channels.length,
     category: category || 'All',
-    channels
+    commitSha: iptvService.getLastCommitSha(),
+    refreshedAt: iptvService.getLastFetchedAt(),
+    channels,
   });
 });
 
