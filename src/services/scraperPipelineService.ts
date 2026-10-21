@@ -692,11 +692,21 @@ export class ScraperPipelineService {
             w1Raw = currentEpWatch1;
           }
 
+          let w2Emb = '';
+          if (currentEpWatch2) {
+            if (currentEpWatch2.includes('greenmotors')) {
+              const gm2 = await resolveGreenmotors(currentEpWatch2);
+              w2Emb = gm2.embedUrl;
+            } else {
+              w2Emb = toEmbedLink(currentEpWatch2);
+            }
+          }
+
           seasonsMap[currentSeason].push({
             episode: currentEpLabel,
             watch_1_embed: w1Emb,
             watch_1_raw: w1Raw,
-            watch_2: currentEpWatch2,
+            watch_2: w2Emb || toEmbedLink(currentEpWatch2),
           });
         }
       }
@@ -735,24 +745,56 @@ export class ScraperPipelineService {
 
         if (currentEpLabel) {
           if (
-            linkText.includes('WATCH-1') ||
-            linkText === 'WATCH' ||
-            linkText.includes('PLAYER 1') ||
-            linkText.includes('PLAYER-1')
+            href.startsWith('#') ||
+            href.includes('javascript:') ||
+            href.includes('t.me') ||
+            href.includes('telegram')
           ) {
-            if (!currentEpWatch1) currentEpWatch1 = href;
-          } else if (
+            continue;
+          }
+
+          const isStreamingHost = [
+            'hdstream4u',
+            'vidaraa',
+            'hubstream',
+            'greenmotors',
+            'hubcloud',
+          ].some((d) => href.includes(d));
+          const isWatchOrPlayer1 =
+            linkText.includes('WATCH-1') ||
+            linkText.includes('PLAYER 1') ||
+            linkText.includes('PLAYER-1') ||
+            linkText.includes('SERVER 1') ||
+            linkText.includes('SERVER-1');
+          const isWatchOrPlayer2 =
             linkText === '2' ||
             linkText.includes('PLAYER-2') ||
             linkText.includes('PLAYER 2') ||
-            linkText.includes('WATCH-2')
-          ) {
+            linkText.includes('WATCH-2') ||
+            linkText.includes('SERVER 2') ||
+            linkText.includes('SERVER-2') ||
+            linkText.includes('ALT');
+
+          if (isWatchOrPlayer2) {
             if (!currentEpWatch2) currentEpWatch2 = href;
-          } else if (
-            !currentEpWatch1 &&
-            ['hdstream4u', 'vidaraa', 'hubstream', 'greenmotors'].some((d) => href.includes(d))
-          ) {
-            currentEpWatch1 = href;
+          } else if (isWatchOrPlayer1) {
+            if (!currentEpWatch1) {
+              currentEpWatch1 = href;
+            } else if (!currentEpWatch2 && currentEpWatch1 !== href) {
+              currentEpWatch2 = href;
+            }
+          } else if (linkText === 'WATCH' || linkText.includes('WATCH')) {
+            if (!currentEpWatch1) {
+              currentEpWatch1 = href;
+            } else if (!currentEpWatch2 && currentEpWatch1 !== href) {
+              currentEpWatch2 = href;
+            }
+          } else if (isStreamingHost) {
+            if (!currentEpWatch1) {
+              currentEpWatch1 = href;
+            } else if (!currentEpWatch2 && currentEpWatch1 !== href) {
+              currentEpWatch2 = href;
+            }
           }
         }
       }
@@ -828,12 +870,22 @@ export class ScraperPipelineService {
       wRaw = watchUrl;
     }
 
+    let p2Emb = '';
+    if (player2Url) {
+      if (player2Url.includes('greenmotors')) {
+        const gm2 = await resolveGreenmotors(player2Url);
+        p2Emb = gm2.embedUrl;
+      } else {
+        p2Emb = toEmbedLink(player2Url);
+      }
+    }
+
     return {
       type: 'movie',
       streams: {
         watch_embed: wEmb,
         watch_raw: wRaw,
-        player_2: player2Url,
+        player_2: p2Emb || toEmbedLink(player2Url),
       },
     };
   }

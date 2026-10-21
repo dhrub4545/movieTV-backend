@@ -126,14 +126,23 @@ export class StreamResolverService {
       if (typeof streams.player_2 === 'string') rawCandidates.push(streams.player_2.trim());
     }
 
+    const normalizeStreamUrl = (url: string): string => {
+      if (!url) return '';
+      url = url.trim();
+      if (url.includes('hdstream4u.com/file/')) return url.replace('/file/', '/embed/');
+      if (url.includes('/file/')) return url.replace('/file/', '/embed/');
+      return url;
+    };
+
     const isLinkValid = (url: string) => {
       return url.length > 0 && !url.includes('/file/') && url.startsWith('http');
     };
 
     const validLinks: string[] = [];
     for (const raw of rawCandidates) {
-      if (isLinkValid(raw) && !validLinks.includes(raw)) {
-        validLinks.push(raw);
+      const normalized = normalizeStreamUrl(raw);
+      if (isLinkValid(normalized) && !validLinks.includes(normalized)) {
+        validLinks.push(normalized);
       }
     }
 
