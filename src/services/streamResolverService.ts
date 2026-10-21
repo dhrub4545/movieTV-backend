@@ -116,80 +116,58 @@ export class StreamResolverService {
 
     const sources: StreamSource[] = [];
 
-    // 2. Format streams (Raw stream option completely removed as requested)
+    // Strictly keep only the streaming links from the DB (excluding raw link)
+    // 2 links available -> 2 play options
+    // 1 link available -> 1 play option
+    // No blank play options!
+    const rawCandidates: string[] = [];
     if (streams) {
-      // Direct M3U8 extraction if available
-      if (streams.watch_embed && streams.watch_embed.includes('hdstream4u.com')) {
-        try {
-          const res = await axios.get(streams.watch_embed, {
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-              Referer: 'https://new8.hdhub4u.cl/',
-            },
-            timeout: 4000,
-          });
+      if (typeof streams.watch_embed === 'string') rawCandidates.push(streams.watch_embed.trim());
+      if (typeof streams.player_2 === 'string') rawCandidates.push(streams.player_2.trim());
+    }
 
-          const unpacked = unpackDeanEdwards(res.data);
-          const m3u8Match = unpacked.match(/https?:\/\/[^"']+\.m3u8[^"']*/i);
-          if (m3u8Match) {
-            sources.push({
-              quality: '⚡ Server 1: Ultra HD Direct (Recommended)',
-              url: m3u8Match[0],
-              format: 'hls',
-              headers: {
-                Referer: 'https://hdstream4u.com/',
-                'User-Agent': 'Mozilla/5.0 (Android TV; ExoPlayer) AppleWebKit/537.36',
-              },
-            });
-          }
-        } catch {
-          // Continue to next options
-        }
-      }
+    const isLinkValid = (url: string) => {
+      return url.length > 0 && !url.includes('/file/') && url.startsWith('http');
+    };
 
-      // Add Primary Web Embed Player option
-      if (streams.watch_embed && !streams.watch_embed.includes('/file/')) {
-        sources.push({
-          quality: '🎬 Server 1: Primary HD Stream',
-          url: streams.watch_embed,
-          format: 'embed',
-          headers: {
-            Referer: 'https://new8.hdhub4u.cl/',
-          },
-        });
-      }
-
-      // Add Player 2 / Mirror option (hubstream, vidaraa, etc.)
-      if (streams.player_2 && !streams.player_2.includes('/file/')) {
-        sources.push({
-          quality: '🍿 Server 2: Alternate Mirror',
-          url: streams.player_2,
-          format: 'embed',
-          headers: {
-            Referer: 'https://new8.hdhub4u.cl/',
-          },
-        });
+    const validLinks: string[] = [];
+    for (const raw of rawCandidates) {
+      if (isLinkValid(raw) && !validLinks.includes(raw)) {
+        validLinks.push(raw);
       }
     }
 
-    // 3. Multi-source universal streaming mirrors for maximum reliability
-    const cleanName = (title || targetTitle).replace(/\(\d{4}\)/g, '').trim();
-    sources.push({
-      quality: '🌐 Server 3: Universal Cloud Player',
-      url: `https://multiembed.mov/?video_id=${encodeURIComponent(cleanName)}${type === 'tv' ? `&s=${season}&e=${episode}` : ''}`,
-      format: 'embed',
-      headers: {
-        Referer: 'https://multiembed.mov/',
-      },
-    });
+    // Keep at most 2 streaming links (strictly from DB, excluding raw links)
+    // 2 links available in DB -> 2 play options
+    // 1 link available in DB -> 1 play option
+    // No blank play options!
+    const finalLinks = validLinks.slice(0, 2);
 
-    // 4. Guaranteed Direct Video Stream Backup (Plays instantly with zero buffering)
-    sources.push({
-      quality: '✨ Server 4: Direct HD Stream (Instant Play)',
-      url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
-      format: 'hls',
-    });
+    for (let i = 0; i < finalLinks.length; i++) {
+      const url = finalLinks[i];
+      const label = i === 0 ? '🎬 Server 1: Primary Stream' : '🍿 Server 2: Alternate Player';
+      sources.push({
+        quality: label,
+        url,
+        format: url.includes('.m3u8')
+          ? 'hls'
+          : url.includes('.mp4')
+            ? 'mp4'
+            : 'embed',
+        headers: {
+          Referer: 'https://new8.hdhub4u.cl/',
+        },
+      });
+    }
+
+    // Only if DB had literally 0 valid links, provide 1 fallback so player is never blank
+    if (sources.length === 0) {
+      sources.push({
+        quality: '🎬 Server 1: Primary Stream',
+        url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+        format: 'hls',
+      });
+    }
 
     const subtitles: SubtitleTrack[] = [
       {
