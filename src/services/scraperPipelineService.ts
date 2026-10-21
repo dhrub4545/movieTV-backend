@@ -367,6 +367,15 @@ export class ScraperPipelineService {
       // Process each discovered item
       for (const item of discoveredItems) {
         try {
+          const isAdult =
+            /\b18\+|\b18\s*\+|adult|erotic|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i.test(
+              `${item.displayName} ${item.fullTitle}`,
+            );
+          if (isAdult) {
+            skippedCount++;
+            continue; // Filter out 18+ adult content from scraper!
+          }
+
           // 1. FAST DB CHECK: Check if item is already saved as a Movie
           const inMovie = await Movie.exists({
             $or: [{ movie_page_url: item.pageUrl }, { title: item.displayName }],

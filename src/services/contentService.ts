@@ -42,6 +42,9 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
   };
 }
 
+const ADULT_REGEX =
+  /\b18\+|\b18\s*\+|adult|erotic|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i;
+
 export function mapSeriesToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
   const cat = detectCategory(doc.title, doc.full_title);
@@ -66,6 +69,7 @@ export function mapSeriesToMediaItem(doc: any): MediaItem {
     genres: [cat, 'Series'],
     duration: `${seasonCount} Season${seasonCount > 1 ? 's' : ''}`,
     streamUrl,
+    seasons: doc.seasons || [],
   };
 }
 
@@ -96,25 +100,37 @@ export class ContentService {
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
     const skip = (page - 1) * limit;
 
-    const query: any = {};
+    const adultFilter = { $not: ADULT_REGEX };
+    const query: any = {
+      title: adultFilter,
+      full_title: adultFilter,
+    };
 
     if (options.search) {
       const q = options.search.trim();
-      query.$or = [
-        { title: { $regex: q, $options: 'i' } },
-        { full_title: { $regex: q, $options: 'i' } },
+      query.$and = [
+        {
+          $or: [
+            { title: { $regex: q, $options: 'i' } },
+            { full_title: { $regex: q, $options: 'i' } },
+          ],
+        },
       ];
     } else if (options.category && options.category.toLowerCase() !== 'all') {
       const cat = options.category.toLowerCase();
-      query.$or = [
-        { title: { $regex: cat, $options: 'i' } },
-        { full_title: { $regex: cat, $options: 'i' } },
+      query.$and = [
+        {
+          $or: [
+            { title: { $regex: cat, $options: 'i' } },
+            { full_title: { $regex: cat, $options: 'i' } },
+          ],
+        },
       ];
     }
 
-    // Sort by createdAt: -1 so new movies appear at the very TOP of the app!
+    // Sort by updatedAt: -1, createdAt: -1 to match exact latest HDHub4u display order
     const findQuery = Movie.find(query)
-      .sort({ createdAt: -1, _id: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .select('id title full_title poster_url poster_filename streams')
       .skip(skip)
       .limit(limit)
@@ -135,7 +151,7 @@ export class ContentService {
       };
     } else {
       if (this.totalMoviesCache === null) {
-        this.totalMoviesCache = await Movie.countDocuments();
+        this.totalMoviesCache = await Movie.countDocuments(query);
       }
       total = this.totalMoviesCache;
       const docs = await findQuery;
@@ -157,12 +173,21 @@ export class ContentService {
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
     const skip = (page - 1) * limit;
 
-    const query: any = {};
+    const adultFilter = { $not: ADULT_REGEX };
+    const query: any = {
+      title: adultFilter,
+      full_title: adultFilter,
+    };
+
     if (options.search) {
       const q = options.search.trim();
-      query.$or = [
-        { title: { $regex: q, $options: 'i' } },
-        { full_title: { $regex: q, $options: 'i' } },
+      query.$and = [
+        {
+          $or: [
+            { title: { $regex: q, $options: 'i' } },
+            { full_title: { $regex: q, $options: 'i' } },
+          ],
+        },
       ];
     }
 
@@ -186,7 +211,7 @@ export class ContentService {
       };
     } else {
       if (this.totalSeriesCache === null) {
-        this.totalSeriesCache = await Series.countDocuments();
+        this.totalSeriesCache = await Series.countDocuments(query);
       }
       total = this.totalSeriesCache;
       const docs = await findQuery;
@@ -217,34 +242,49 @@ export class ContentService {
     }
 
     const projection = 'id title full_title poster_url poster_filename streams';
+    const adultFilter = { $not: ADULT_REGEX };
+    const baseMovieFilter = {
+      title: adultFilter,
+      full_title: adultFilter,
+    };
 
     const [latestMovies, bollywood, southDubbed, hollywood, webSeries] = await Promise.all([
-      Movie.find().sort({ createdAt: -1, _id: -1 }).select(projection).limit(20).lean(),
-      Movie.find({
-        $or: [{ full_title: /hindi/i }, { title: /hindi/i }],
-      })
-        .sort({ createdAt: -1, _id: -1 })
+      Movie.find(baseMovieFilter)
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
       Movie.find({
+        ...baseMovieFilter,
+        $or: [{ full_title: /hindi/i }, { title: /hindi/i }],
+      })
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .select(projection)
+        .limit(20)
+        .lean(),
+      Movie.find({
+        ...baseMovieFilter,
         $or: [
           { full_title: /telugu|tamil|kannada|malayalam/i },
           { title: /telugu|tamil|kannada|malayalam/i },
         ],
       })
-        .sort({ createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
       Movie.find({
+        ...baseMovieFilter,
         $or: [{ full_title: /dual audio|english/i }, { title: /dual audio|english/i }],
       })
-        .sort({ createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
-      Series.find()
+      Series.find({
+        title: adultFilter,
+        full_title: adultFilter,
+      })
         .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
         .select('id title full_title poster_url poster_filename seasons')
         .limit(20)
