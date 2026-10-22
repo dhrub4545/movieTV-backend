@@ -362,8 +362,21 @@ export class ScraperPipelineService {
         try {
           const resp = await axios.get(pageUrl, { headers: HEADERS, timeout: 12000 });
           const html = resp.data;
+
+          // Ignore the top horizontal scrolling cards/carousel and start strictly from "Latest Releases" below it
+          let targetHtml = html;
+          const latestReleasesIdx = targetHtml.search(/Latest\s+Releases/i);
+          if (latestReleasesIdx !== -1) {
+            targetHtml = targetHtml.substring(latestReleasesIdx);
+          } else {
+            const recentMoviesIdx = targetHtml.search(/class=["'][^"']*recent-movies[^"']*["']/i);
+            if (recentMoviesIdx !== -1) {
+              targetHtml = targetHtml.substring(recentMoviesIdx);
+            }
+          }
+
           const items =
-            html.match(/<li[^>]*class=["'][^"']*thumb[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi) || [];
+            targetHtml.match(/<li[^>]*class=["'][^"']*thumb[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi) || [];
 
           for (const itemHtml of items) {
             const hrefM = itemHtml.match(/<a\s+[^>]*href=["']([^"']+)["']/i);
