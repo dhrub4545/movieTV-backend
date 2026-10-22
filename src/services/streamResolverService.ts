@@ -2,6 +2,7 @@ import axios from 'axios';
 import mongoose from 'mongoose';
 import { Movie, Series } from '../db';
 import { StreamResolveResponse, StreamSource, SubtitleTrack } from '../types';
+import { scraperPipelineService } from './scraperPipelineService';
 
 function unpackDeanEdwards(packed: string): string {
   try {
@@ -164,7 +165,7 @@ export class StreamResolverService {
             ? 'mp4'
             : 'embed',
         headers: {
-          Referer: 'https://new8.hdhub4u.cl/',
+          Referer: `${scraperPipelineService.getBaseUrl()}/`,
         },
       });
     }
