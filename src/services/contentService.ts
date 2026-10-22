@@ -41,8 +41,27 @@ function detectQuality(title: string = '', fullTitle: string = ''): string {
   return 'HD';
 }
 
+const FOREIGN_INDICATORS =
+  /\b(english|hollywood|japanese|korean|indonesian|chinese|thai|russian|spanish|french|german|turkish|italian|anime)\b/i;
+
+function determineIsIndian(doc: any): boolean {
+  if (typeof doc.is_indian === 'boolean') {
+    return doc.is_indian;
+  }
+  const text = `${doc.title || ''} ${doc.full_title || ''}`;
+  return !FOREIGN_INDICATORS.test(text);
+}
+
 export function mapMovieToMediaItem(doc: any): MediaItem {
-  const year = extractYear(doc.title);
+  let yearNum = typeof doc.year === 'number' && doc.year > 1900 ? doc.year : null;
+  if (!yearNum) {
+    const text = `${doc.full_title || ''} ${doc.title || ''}`;
+    const m = text.match(/\b(19\d{2}|20\d{2})\b/);
+    yearNum = m ? parseInt(m[1], 10) : 2026;
+  }
+
+  const isIndian = determineIsIndian(doc);
+  const region: 'Indian' | 'Non-Indian' = isIndian ? 'Indian' : 'Non-Indian';
   const cat = detectCategory(doc.title, doc.full_title);
   const quality = detectQuality(doc.title, doc.full_title);
   let poster =
@@ -60,11 +79,18 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     overview: doc.full_title || doc.title,
     posterUrl: poster,
     backdropUrl: poster,
-    releaseYear: year,
+    releaseYear: String(yearNum),
+    year: yearNum,
+    isIndian,
+    region,
     rating: 8.5,
     type: 'movie',
-    category: cat,
-    genres: [cat, 'HD'],
+    category: isIndian
+      ? (cat === 'Bollywood' || cat === 'Tollywood' || cat === 'Tamil' || cat === 'Malayalam' || cat === 'Punjabi'
+          ? cat
+          : 'Indian Cinema')
+      : cat,
+    genres: [region, cat, 'HD'],
     duration: 'Full Movie',
     quality,
     streamUrl: undefined,
@@ -152,21 +178,27 @@ export class ContentService {
         },
       ];
     } else if (options.category && options.category.toLowerCase() !== 'all') {
-      const cat = options.category.toLowerCase();
-      query.$and = [
-        {
-          $or: [
-            { title: { $regex: cat, $options: 'i' } },
-            { full_title: { $regex: cat, $options: 'i' } },
-          ],
-        },
-      ];
+      const cat = options.category.toLowerCase().trim();
+      if (cat === 'indian') {
+        query.is_indian = true;
+      } else if (cat === 'non-indian' || cat === 'non_indian' || cat === 'international') {
+        query.is_indian = false;
+      } else {
+        query.$and = [
+          {
+            $or: [
+              { title: { $regex: cat, $options: 'i' } },
+              { full_title: { $regex: cat, $options: 'i' } },
+            ],
+          },
+        ];
+      }
     }
 
-    // Sort by updatedAt: -1, createdAt: -1 to match exact latest HDHub4u display order
+    // Sort latest movies first by release year, then by updatedAt, createdAt
     const findQuery = Movie.find(query)
-      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-      .select('id title full_title poster_url poster_filename streams')
+      .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+      .select('id title full_title poster_url poster_filename year is_indian streams')
       .skip(skip)
       .limit(limit)
       .lean();
@@ -302,8 +334,8 @@ export class ContentService {
 
     const [movies, series] = await Promise.all([
       Movie.find(query)
-        .sort({ updatedAt: -1, _id: -1 })
-        .select('id title full_title poster_url poster_filename streams updatedAt')
+        .sort({ year: -1, updatedAt: -1, _id: -1 })
+        .select('id title full_title poster_url poster_filename year is_indian streams updatedAt')
         .skip(halfSkip)
         .limit(halfLimit + 10)
         .lean(),
@@ -339,16 +371,32 @@ export class ContentService {
       return this.cachedHomeFeed;
     }
 
-    const projection = 'id title full_title poster_url poster_filename streams';
+    const projection = 'id title full_title poster_url poster_filename year is_indian streams';
     const adultFilter = { $not: ADULT_REGEX };
     const baseMovieFilter = {
       title: adultFilter,
       full_title: adultFilter,
     };
 
-    const [latestMovies, bollywood, southDubbed, hollywood, webSeries] = await Promise.all([
+    const [latestMovies, indianMovies, nonIndianMovies, bollywood, southDubbed, hollywood, webSeries] = await Promise.all([
       Movie.find(baseMovieFilter)
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .select(projection)
+        .limit(20)
+        .lean(),
+      Movie.find({
+        ...baseMovieFilter,
+        is_indian: true,
+      })
+        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .select(projection)
+        .limit(20)
+        .lean(),
+      Movie.find({
+        ...baseMovieFilter,
+        is_indian: false,
+      })
+        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -356,7 +404,7 @@ export class ContentService {
         ...baseMovieFilter,
         $or: [{ full_title: /hindi/i }, { title: /hindi/i }],
       })
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -367,7 +415,7 @@ export class ContentService {
           { title: /telugu|tamil|kannada|malayalam/i },
         ],
       })
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -375,7 +423,7 @@ export class ContentService {
         ...baseMovieFilter,
         $or: [{ full_title: /dual audio|english/i }, { title: /dual audio|english/i }],
       })
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -390,6 +438,8 @@ export class ContentService {
     ]);
 
     const latestItems = latestMovies.map(mapMovieToMediaItem);
+    const indianItems = indianMovies.map(mapMovieToMediaItem);
+    const nonIndianItems = nonIndianMovies.map(mapMovieToMediaItem);
     const bollywoodItems = bollywood.map(mapMovieToMediaItem);
     const southItems = southDubbed.map(mapMovieToMediaItem);
     const hollywoodItems = hollywood.map(mapMovieToMediaItem);
@@ -413,10 +463,22 @@ export class ContentService {
       featured,
       sections: [
         {
-          title: '🔥 Latest DB Movies (2026 Releases)',
+          title: '🔥 Latest Releases (Newest First)',
           category: 'Latest',
           type: 'movie',
           items: latestItems,
+        },
+        {
+          title: '🇮🇳 Latest Indian Movies',
+          category: 'Indian',
+          type: 'movie',
+          items: indianItems.length > 0 ? indianItems : latestItems,
+        },
+        {
+          title: '🌍 Latest Non-Indian Movies',
+          category: 'Non-Indian',
+          type: 'movie',
+          items: nonIndianItems.length > 0 ? nonIndianItems : latestItems,
         },
         {
           title: '🎬 Bollywood & Hindi Cinema',

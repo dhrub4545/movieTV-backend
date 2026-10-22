@@ -48,6 +48,34 @@ feedRouter.get('/movies', async (req, res) => {
   }
 });
 
+// GET /api/feed/movies/indian?page=1&limit=40&search=...
+feedRouter.get('/movies/indian', async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 40;
+    const search = req.query.search as string | undefined;
+
+    const result = await contentService.getMovies({ page, limit, category: 'indian', search });
+    res.json(result.items);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch Indian movies', message: err.message });
+  }
+});
+
+// GET /api/feed/movies/non-indian?page=1&limit=40&search=...
+feedRouter.get('/movies/non-indian', async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 40;
+    const search = req.query.search as string | undefined;
+
+    const result = await contentService.getMovies({ page, limit, category: 'non-indian', search });
+    res.json(result.items);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch Non-Indian movies', message: err.message });
+  }
+});
+
 // GET /api/feed/series?page=1&limit=40&search=...
 feedRouter.get('/series', async (req, res) => {
   try {

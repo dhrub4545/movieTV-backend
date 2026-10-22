@@ -98,6 +98,20 @@ function cleanTitle(rawTitle: string): { displayName: string; cleanName: string 
   };
 }
 
+function extractReleaseYear(title: string, fullTitle?: string): number {
+  const text = `${fullTitle || ''} ${title || ''}`;
+  const match = text.match(/\b(19\d{2}|20\d{2})\b/);
+  return match ? parseInt(match[1], 10) : new Date().getFullYear();
+}
+
+const FOREIGN_INDICATORS =
+  /\b(english|hollywood|japanese|korean|indonesian|chinese|thai|russian|spanish|french|german|turkish|italian|anime)\b/i;
+
+function isIndianMovie(title: string, fullTitle?: string): boolean {
+  const text = `${title || ''} ${fullTitle || ''}`;
+  return !FOREIGN_INDICATORS.test(text);
+}
+
 export interface ScraperStatus {
   isRunning: boolean;
   intervalMinutes: number;
@@ -511,6 +525,12 @@ export class ScraperPipelineService {
             if (item.posterUrl && !inMovie.poster_url) inMovie.poster_url = item.posterUrl;
             if (item.fullTitle && inMovie.full_title !== item.fullTitle) inMovie.full_title = item.fullTitle;
             if (item.pageUrl && inMovie.movie_page_url !== item.pageUrl) inMovie.movie_page_url = item.pageUrl;
+            if (!inMovie.year || inMovie.year < 1900) {
+              inMovie.year = extractReleaseYear(item.displayName, item.fullTitle);
+            }
+            if (inMovie.is_indian === undefined || inMovie.is_indian === null) {
+              inMovie.is_indian = isIndianMovie(item.displayName, item.fullTitle);
+            }
 
             await inMovie.save();
 
@@ -589,6 +609,9 @@ export class ScraperPipelineService {
               `🔥 [NEW WEBSERIES ADDED] ${item.displayName} (${parsed.seasons.length} Season(s)) -> Pushed to TOP!`,
             );
           } else {
+            const year = extractReleaseYear(item.displayName, item.fullTitle);
+            const isIndian = isIndianMovie(item.displayName, item.fullTitle);
+
             const newMovieDoc = new Movie({
               id: `movie_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
               title: item.displayName,
@@ -596,6 +619,8 @@ export class ScraperPipelineService {
               type: 'movie',
               poster_url: item.posterUrl,
               movie_page_url: item.pageUrl,
+              year,
+              is_indian: isIndian,
               streams: parsed.streams || {},
               createdAt: new Date(),
               updatedAt: new Date(),

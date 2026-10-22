@@ -8,6 +8,9 @@ export interface MediaItem {
   posterUrl: string;
   backdropUrl: string;
   releaseYear: string;
+  year?: number;
+  isIndian?: boolean;
+  region?: 'Indian' | 'Non-Indian';
   rating: number; // e.g. 8.4
   type: MediaType;
   category: string; // e.g. 'Bollywood', 'Hollywood', 'Web Series', 'Action'

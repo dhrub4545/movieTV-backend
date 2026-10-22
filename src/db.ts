@@ -29,6 +29,8 @@ export interface IMovie extends Document {
   poster_filename?: string;
   poster_url?: string;
   movie_page_url?: string;
+  year?: number;
+  is_indian?: boolean;
   streams?: IStreams;
   createdAt?: Date;
   updatedAt?: Date;
@@ -97,13 +99,17 @@ const MovieSchema = new Schema<IMovie>(
     poster_filename: { type: String, default: '' },
     poster_url: { type: String, default: '' },
     movie_page_url: { type: String, default: '' },
+    year: { type: Number, index: true },
+    is_indian: { type: Boolean, index: true },
     streams: { type: StreamsSchema, default: () => ({}) },
   },
   { timestamps: true },
 );
 
-// Compound text index for sub-millisecond search across 11,000+ movies
+// Compound text and sorting indexes for sub-millisecond query execution
 MovieSchema.index({ title: 'text', full_title: 'text' });
+MovieSchema.index({ is_indian: 1, year: -1, updatedAt: -1 });
+MovieSchema.index({ year: -1, updatedAt: -1, createdAt: -1 });
 
 const SeriesSchema = new Schema<ISeries>(
   {
