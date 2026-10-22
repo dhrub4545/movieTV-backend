@@ -2,6 +2,12 @@ import { Router } from 'express';
 import { contentService } from '../services/contentService';
 
 export const feedRouter = Router();
+ 
+// Ensure responses are never cached by proxies/clients so new scraped releases appear immediately
+feedRouter.use((_req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  next();
+});
 
 // GET /api/feed/home
 feedRouter.get('/home', async (_req, res) => {

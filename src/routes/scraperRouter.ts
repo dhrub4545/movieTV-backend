@@ -4,10 +4,11 @@ import { scraperPipelineService } from '../services/scraperPipelineService';
 export const scraperRouter = Router();
 
 // Get scraper pipeline status & scheduling info
-scraperRouter.get('/status', (_req: Request, res: Response) => {
+scraperRouter.get('/status', async (_req: Request, res: Response) => {
+  const scraper = await scraperPipelineService.getStatus();
   res.json({
     status: 'ok',
-    scraper: scraperPipelineService.getStatus(),
+    scraper,
   });
 });
 
@@ -29,7 +30,7 @@ scraperRouter.get('/config', (_req: Request, res: Response) => {
 });
 
 // Update scraper source baseUrl dynamically
-scraperRouter.post('/config', (req: Request, res: Response) => {
+scraperRouter.post('/config', async (req: Request, res: Response) => {
   const { baseUrl } = req.body || {};
   if (!baseUrl || typeof baseUrl !== 'string' || baseUrl.trim().length < 5) {
     return res.status(400).json({
@@ -38,7 +39,7 @@ scraperRouter.post('/config', (req: Request, res: Response) => {
     });
   }
 
-  const result = scraperPipelineService.setBaseUrl(baseUrl);
+  const result = await scraperPipelineService.setBaseUrl(baseUrl);
   res.json({
     status: 'ok',
     ...result,
@@ -62,25 +63,35 @@ scraperRouter.post('/test', async (req: Request, res: Response) => {
   }
 });
 
-// Trigger pipeline manually or via scheduled Vercel Cron (GET)
-const handleTrigger = async (_req: Request, res: Response) => {
-  const status = scraperPipelineService.getStatus();
+// Trigger pipeline manually or via scheduled cron-job.org / Vercel Cron (GET or POST)
+const handleTrigger = async (req: Request, res: Response) => {
+  const status = await scraperPipelineService.getStatus();
   if (status.isRunning) {
     return res.status(409).json({
       status: 'already_running',
       message: 'Scraper pipeline is already executing.',
+      scraper: status,
     });
   }
 
-  // Trigger in background without blocking HTTP response
-  scraperPipelineService.runPipeline().catch((err) => {
-    console.error('Triggered pipeline execution error:', err);
-  });
+  try {
+    const maxPages = Number(req.query.pages || req.body?.pages) || 1;
+    const result = await scraperPipelineService.runPipeline({ maxPages });
+    const updatedStatus = await scraperPipelineService.getStatus();
 
-  res.json({
-    status: 'triggered',
-    message: 'Scraper pipeline triggered successfully. Scanning for new movies and series...',
-  });
+    res.json({
+      status: 'success',
+      message: `Scraper pipeline completed successfully: ${result?.newMovies || 0} new movies, ${result?.newSeries || 0} new series, ${result?.updatedMovies || 0} updated movies, ${result?.updatedSeriesEpisodes || 0} updated series episodes.`,
+      result,
+      scraper: updatedStatus,
+    });
+  } catch (err: any) {
+    console.error('Triggered pipeline execution error:', err);
+    res.status(500).json({
+      status: 'error',
+      message: err?.message || 'Scraper execution error',
+    });
+  }
 };
 
 scraperRouter.post('/trigger', handleTrigger);

@@ -127,6 +127,36 @@ export const Movie: Model<IMovie> =
 export const Series: Model<ISeries> =
   mongoose.models.Series || mongoose.model<ISeries>('Series', SeriesSchema);
 
+export interface IScraperMeta extends Document {
+  key: string;
+  baseUrl: string;
+  lastRunAt?: Date;
+  nextRunAt?: Date;
+  totalNewMoviesAdded: number;
+  totalNewSeriesAdded: number;
+  totalMoviesUpdated: number;
+  totalEpisodesUpdated: number;
+  lastRunResult?: any;
+}
+
+const ScraperMetaSchema = new Schema<IScraperMeta>(
+  {
+    key: { type: String, required: true, unique: true, index: true },
+    baseUrl: { type: String, default: 'https://new8.hdhub4u.cl' },
+    lastRunAt: { type: Date, default: null },
+    nextRunAt: { type: Date, default: null },
+    totalNewMoviesAdded: { type: Number, default: 0 },
+    totalNewSeriesAdded: { type: Number, default: 0 },
+    totalMoviesUpdated: { type: Number, default: 0 },
+    totalEpisodesUpdated: { type: Number, default: 0 },
+    lastRunResult: { type: Schema.Types.Mixed, default: null },
+  },
+  { timestamps: true },
+);
+
+export const ScraperMeta: Model<IScraperMeta> =
+  mongoose.models.ScraperMeta || mongoose.model<IScraperMeta>('ScraperMeta', ScraperMetaSchema);
+
 let isConnected = false;
 let connectionPromise: Promise<void> | null = null;
 

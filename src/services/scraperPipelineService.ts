@@ -1,7 +1,7 @@
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
-import { Movie, Series } from '../db';
+import { Movie, ScraperMeta, Series } from '../db';
 import { ContentService } from './contentService';
 
 const HEADERS = {
@@ -166,7 +166,7 @@ export class ScraperPipelineService {
     return this.baseUrl;
   }
 
-  setBaseUrl(newUrl: string): { success: boolean; message: string; previousUrl: string; currentUrl: string } {
+  async setBaseUrl(newUrl: string): Promise<{ success: boolean; message: string; previousUrl: string; currentUrl: string }> {
     let clean = (newUrl || '').trim();
     if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
       clean = 'https://' + clean;
@@ -197,6 +197,16 @@ export class ScraperPipelineService {
       } catch (err: any) {
         console.warn('Failed to persist scraper_config.json in /tmp:', err.message);
       }
+    }
+
+    try {
+      await ScraperMeta.findOneAndUpdate(
+        { key: 'global_scraper_status' },
+        { $set: { baseUrl: this.baseUrl } },
+        { upsert: true },
+      );
+    } catch (err: any) {
+      console.warn('Could not persist baseUrl to MongoDB:', err.message);
     }
 
     console.log(`🔄 [Scraper Pipeline] Source URL updated to: ${this.baseUrl}`);
@@ -265,7 +275,31 @@ export class ScraperPipelineService {
     }
   }
 
-  getStatus(): ScraperStatus {
+  async getStatus(): Promise<ScraperStatus> {
+    try {
+      const meta = await ScraperMeta.findOne({ key: 'global_scraper_status' }).lean();
+      if (meta) {
+        if (meta.baseUrl && meta.baseUrl !== this.baseUrl) {
+          this.baseUrl = meta.baseUrl;
+          HEADERS.Referer = meta.baseUrl + '/';
+        }
+        return {
+          baseUrl: meta.baseUrl || this.baseUrl,
+          isRunning: this.isRunning,
+          intervalMinutes: 10,
+          lastRunAt: meta.lastRunAt ? new Date(meta.lastRunAt).toISOString() : null,
+          nextRunAt: meta.nextRunAt ? new Date(meta.nextRunAt).toISOString() : null,
+          totalNewMoviesAdded: meta.totalNewMoviesAdded || 0,
+          totalNewSeriesAdded: meta.totalNewSeriesAdded || 0,
+          totalMoviesUpdated: meta.totalMoviesUpdated || 0,
+          totalEpisodesUpdated: meta.totalEpisodesUpdated || 0,
+          lastRunResult: meta.lastRunResult || null,
+        };
+      }
+    } catch (err: any) {
+      console.warn('Could not read persistent scraper status from MongoDB:', err.message);
+    }
+
     return {
       baseUrl: this.baseUrl,
       isRunning: this.isRunning,
@@ -282,22 +316,25 @@ export class ScraperPipelineService {
 
   /**
    * Main pipeline execution:
-   * 1. Fetches latest releases from page 1 and page 2.
-   * 2. Checks MongoDB:
-   *    - For existing Movies: Fetches detail page and REPLACES old stream links with updated scraped links!
-   *    - For existing Series: Checks if new episodes were uploaded or episode stream links were updated.
-   * 3. For new items, parses stream links & pushes to DB with createdAt/updatedAt = now (TOP OF FEED).
+   * 1. Fetches latest releases from page 1 (and page 2 if requested).
+   * 2. Checks MongoDB in high-speed batches:
+   *    - Existing Movies with valid stream links and matching title are fast-skipped in 0ms.
+   *    - Movies with updated quality / audio (or missing links) are refreshed.
+   *    - Existing Series are fast-skipped if fullTitle matches (no new episodes).
+   *    - Series with new episodes are parsed and merged to top of feed.
+   * 3. Brand-new releases are parsed & inserted at top of feed (createdAt/updatedAt = now).
+   * 4. Invalidates in-memory cache and persists execution metrics to MongoDB.
    */
-  async runPipeline(): Promise<void> {
+  async runPipeline(options?: { maxPages?: number }): Promise<ScraperStatus['lastRunResult']> {
     if (this.isRunning) {
       console.log('⏳ Scraper pipeline is already running. Skipping overlapping execution.');
-      return;
+      return this.lastRunResult;
     }
 
     this.isRunning = true;
     const startTime = Date.now();
     console.log('\n===============================================================');
-    console.log(`🚀 [Scraper Pipeline] Starting 10-min scan at ${new Date().toISOString()}...`);
+    console.log(`🚀 [Scraper Pipeline] Starting scan at ${new Date().toISOString()}...`);
 
     let scannedCount = 0;
     let newMoviesCount = 0;
@@ -307,11 +344,11 @@ export class ScraperPipelineService {
     let skippedCount = 0;
 
     try {
-      // Scan Page 1 and Page 2 (covers the newest 100+ releases)
-      const pagesToScan = [
-        `${this.baseUrl}/`,
-        `${this.baseUrl}/page/2/`,
-      ];
+      const maxPages = options?.maxPages && options.maxPages > 1 ? options.maxPages : 1;
+      const pagesToScan: string[] = [`${this.baseUrl}/`];
+      for (let p = 2; p <= maxPages; p++) {
+        pagesToScan.push(`${this.baseUrl}/page/${p}/`);
+      }
 
       const discoveredItems: Array<{
         pageUrl: string;
@@ -323,7 +360,7 @@ export class ScraperPipelineService {
 
       for (const pageUrl of pagesToScan) {
         try {
-          const resp = await axios.get(pageUrl, { headers: HEADERS, timeout: 15000 });
+          const resp = await axios.get(pageUrl, { headers: HEADERS, timeout: 12000 });
           const html = resp.data;
           const items =
             html.match(/<li[^>]*class=["'][^"']*thumb[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi) || [];
@@ -368,7 +405,32 @@ export class ScraperPipelineService {
       }
 
       scannedCount = discoveredItems.length;
-      console.log(`[Scraper Pipeline] Found ${scannedCount} items from latest pages.`);
+      console.log(`[Scraper Pipeline] Found ${scannedCount} items from latest page(s).`);
+
+      // High-speed batch lookup in MongoDB
+      const pageUrls = discoveredItems.map((d) => d.pageUrl);
+      const displayNames = discoveredItems.map((d) => d.displayName);
+
+      const [existingMovies, existingSeriesList] = await Promise.all([
+        Movie.find({
+          $or: [{ movie_page_url: { $in: pageUrls } }, { title: { $in: displayNames } }],
+        }),
+        Series.find({
+          $or: [{ movie_page_url: { $in: pageUrls } }, { title: { $in: displayNames } }],
+        }),
+      ]);
+
+      const movieMap = new Map<string, any>();
+      for (const m of existingMovies) {
+        if (m.movie_page_url) movieMap.set(m.movie_page_url, m);
+        if (m.title) movieMap.set(m.title, m);
+      }
+
+      const seriesMap = new Map<string, any>();
+      for (const s of existingSeriesList) {
+        if (s.movie_page_url) seriesMap.set(s.movie_page_url, s);
+        if (s.title) seriesMap.set(s.title, s);
+      }
 
       // Process each discovered item
       for (const item of discoveredItems) {
@@ -379,16 +441,24 @@ export class ScraperPipelineService {
             );
           if (isAdult) {
             skippedCount++;
-            continue; // Filter out 18+ adult content from scraper!
+            continue; // Filter out 18+ adult content
           }
 
-          // 1. DB CHECK: Check if item is already saved as a Movie
-          const inMovie = await Movie.findOne({
-            $or: [{ movie_page_url: item.pageUrl }, { title: item.displayName }],
-          });
+          const inMovie = movieMap.get(item.pageUrl) || movieMap.get(item.displayName);
+          const existingSeries = seriesMap.get(item.pageUrl) || seriesMap.get(item.displayName);
 
+          // 1. Existing Movie in DB
           if (inMovie) {
-            // Movie is already in DB -> Fetch detail page and REPLACE old stream links with newly scraped links!
+            const hasStreams = Boolean(inMovie.streams?.watch_embed || inMovie.streams?.player_2);
+            const titleUnchanged = inMovie.full_title === item.fullTitle;
+
+            // Fast skip if movie already has valid streams and title hasn't changed (no quality upgrade)
+            if (hasStreams && titleUnchanged) {
+              skippedCount++;
+              continue;
+            }
+
+            // Movie needs updated stream links or quality upgrade
             const detailHtml = await this.fetchDetailPage(item.pageUrl);
             let updatedStream = false;
 
@@ -414,7 +484,6 @@ export class ScraperPipelineService {
                   if (!inMovie.streams) {
                     inMovie.streams = {};
                   }
-                  // Replace old stream links with the updated stream links
                   if (newEmbed) inMovie.streams.watch_embed = newEmbed;
                   if (newPlayer2) inMovie.streams.player_2 = newPlayer2;
                   if (newRaw) inMovie.streams.watch_raw = newRaw;
@@ -444,13 +513,15 @@ export class ScraperPipelineService {
             continue;
           }
 
-          // 2. DB CHECK: Check if item is already saved as a Series
-          const existingSeries = await Series.findOne({
-            $or: [{ movie_page_url: item.pageUrl }, { title: item.displayName }],
-          });
-
+          // 2. Existing Series in DB
           if (existingSeries) {
-            // Check if series has new episodes or updated episode stream links
+            const titleUnchanged = existingSeries.full_title === item.fullTitle;
+            if (titleUnchanged) {
+              skippedCount++;
+              continue; // Series already has latest episodes
+            }
+
+            // Series has new episodes uploaded
             const detailHtml = await this.fetchDetailPage(item.pageUrl);
             if (detailHtml) {
               const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
@@ -465,7 +536,7 @@ export class ScraperPipelineService {
                   await existingSeries.save();
                   updatedEpisodesCount += updatedCount;
                   console.log(
-                    `✨ [UPDATED SERIES] ${existingSeries.title}: Updated ${updatedCount} episode(s) / stream link(s) -> Pushed to TOP!`,
+                    `✨ [UPDATED SERIES] ${existingSeries.title}: Updated ${updatedCount} episode(s) -> Pushed to TOP!`,
                   );
                   continue;
                 }
@@ -473,10 +544,10 @@ export class ScraperPipelineService {
             }
 
             skippedCount++;
-            continue; // Already up to date -> SKIP!
+            continue;
           }
 
-          // 3. BRAND NEW ITEM NOT IN DB: Fetch details and insert!
+          // 3. Brand New Release Not In DB
           const detailHtml = await this.fetchDetailPage(item.pageUrl);
           if (!detailHtml) {
             skippedCount++;
@@ -486,7 +557,6 @@ export class ScraperPipelineService {
           const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
 
           if (parsed.type === 'series' && parsed.seasons && parsed.seasons.length > 0) {
-            // Create new Series
             const newSeriesDoc = new Series({
               id: `series_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
               title: item.displayName,
@@ -506,7 +576,6 @@ export class ScraperPipelineService {
               `🔥 [NEW WEBSERIES ADDED] ${item.displayName} (${parsed.seasons.length} Season(s)) -> Pushed to TOP!`,
             );
           } else {
-            // Create new Movie
             const newMovieDoc = new Movie({
               id: `movie_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
               title: item.displayName,
@@ -529,7 +598,7 @@ export class ScraperPipelineService {
         }
       }
 
-      // If new movies/series or updated stream links were added, clear cache so app sees them immediately
+      // If new movies/series or updated stream links were added, invalidate in-memory cache
       if (newMoviesCount > 0 || updatedMoviesCount > 0 || newSeriesCount > 0 || updatedEpisodesCount > 0) {
         if (this.contentService) {
           this.contentService.invalidateCache();
@@ -553,6 +622,29 @@ export class ScraperPipelineService {
         durationMs,
       };
 
+      try {
+        await ScraperMeta.findOneAndUpdate(
+          { key: 'global_scraper_status' },
+          {
+            $set: {
+              baseUrl: this.baseUrl,
+              lastRunAt: this.lastRunAt,
+              nextRunAt: this.nextRunAt,
+              lastRunResult: this.lastRunResult,
+            },
+            $inc: {
+              totalNewMoviesAdded: newMoviesCount,
+              totalNewSeriesAdded: newSeriesCount,
+              totalMoviesUpdated: updatedMoviesCount,
+              totalEpisodesUpdated: updatedEpisodesCount,
+            },
+          },
+          { upsert: true, returnDocument: 'after' as any },
+        );
+      } catch (metaErr: any) {
+        console.warn('Could not persist scraper execution metrics to MongoDB:', metaErr.message);
+      }
+
       console.log('---------------------------------------------------------------');
       console.log(
         `✅ [Scraper Pipeline] Completed in ${(durationMs / 1000).toFixed(1)}s: ` +
@@ -561,6 +653,8 @@ export class ScraperPipelineService {
       );
       console.log(`⏰ Next scheduled run at: ${this.nextRunAt.toISOString()}`);
       console.log('===============================================================\n');
+
+      return this.lastRunResult;
     }
   }
 
