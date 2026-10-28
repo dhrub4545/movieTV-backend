@@ -2,7 +2,9 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { Movie, ScraperMeta, Series } from '../db';
-import { ContentService } from './contentService';
+import { MediaItem } from '../types';
+import { ContentService, mapMovieToMediaItem, mapSeriesToMediaItem } from './contentService';
+import { extractDirectM3u8 } from './m3u8Extractor';
 
 const HEADERS = {
   'User-Agent':
@@ -148,8 +150,20 @@ export class ScraperPipelineService {
   private lastRunResult: ScraperStatus['lastRunResult'] = null;
   private readonly INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
+  // In-memory cache of exact scraped latest releases matching HDHub4u homepage
+  private latestLiveItems: MediaItem[] = [];
+  private latestLiveItemsTime = 0;
+
   constructor(private contentService?: ContentService) {
     this.loadPersistedConfig();
+  }
+
+  async getLatestLiveItems(forceRefresh = false): Promise<MediaItem[]> {
+    if (!forceRefresh && this.latestLiveItems.length > 0 && Date.now() - this.latestLiveItemsTime < this.INTERVAL_MS) {
+      return this.latestLiveItems;
+    }
+    await this.runPipeline({ maxPages: 2 });
+    return this.latestLiveItems;
   }
 
   private loadPersistedConfig() {
@@ -358,7 +372,7 @@ export class ScraperPipelineService {
     let skippedCount = 0;
 
     try {
-      const maxPages = options?.maxPages && options.maxPages > 1 ? options.maxPages : 1;
+      const maxPages = options?.maxPages && options.maxPages > 1 ? options.maxPages : 2;
       const pagesToScan: string[] = [`${this.baseUrl}/`];
       for (let p = 2; p <= maxPages; p++) {
         pagesToScan.push(`${this.baseUrl}/page/${p}/`);
@@ -459,12 +473,16 @@ export class ScraperPipelineService {
         if (s.title) seriesMap.set(s.title, s);
       }
 
+      const liveItems: MediaItem[] = [];
+
       // Process each discovered item
       for (const item of discoveredItems) {
         try {
+          const isToxic = /\btoxic\b/i.test(`${item.displayName} ${item.fullTitle} ${item.pageUrl}`);
           const isAdult =
-            /\b18\+|\b18\s*\+|adult|erotic|sex|\bhot\b|sensual|softcore|hotshots|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i.test(
-              `${item.displayName} ${item.fullTitle}`,
+            !isToxic &&
+            /\b18\+|\b18\s*\+|adult|erotic|sex|\bhot\b|sensual|softcore|hotshots|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams|atrangii|papa['’]?s?[\s\-_]*friends?\b/i.test(
+              `${item.displayName} ${item.fullTitle} ${item.pageUrl}`,
             );
           if (isAdult) {
             skippedCount++;
@@ -476,6 +494,7 @@ export class ScraperPipelineService {
 
           // 1. Existing Movie in DB
           if (inMovie) {
+            liveItems.push(mapMovieToMediaItem(inMovie));
             const hasStreams = Boolean(inMovie.streams?.watch_embed || inMovie.streams?.player_2);
             const titleUnchanged = inMovie.full_title === item.fullTitle;
 
@@ -495,16 +514,23 @@ export class ScraperPipelineService {
                 const newEmbed = (parsed.streams.watch_embed || '').trim();
                 const newRaw = (parsed.streams.watch_raw || '').trim();
                 const newPlayer2 = (parsed.streams.player_2 || '').trim();
+                const newM3u8 = (parsed.streams.m3u8_url || '').trim();
+
+                const newPlayer2M3u8 = (parsed.streams.player_2_m3u8_url || '').trim();
 
                 const oldEmbed = inMovie.streams?.watch_embed || '';
                 const oldRaw = inMovie.streams?.watch_raw || '';
                 const oldPlayer2 = inMovie.streams?.player_2 || '';
+                const oldM3u8 = inMovie.streams?.m3u8_url || '';
+                const oldP2M3u8 = inMovie.streams?.player_2_m3u8_url || '';
 
-                const hasNewLinks = newEmbed.length > 0 || newPlayer2.length > 0;
+                const hasNewLinks = newEmbed.length > 0 || newPlayer2.length > 0 || newM3u8.length > 0 || newPlayer2M3u8.length > 0;
                 const isChanged = Boolean(
                   (newEmbed && newEmbed !== oldEmbed) ||
                   (newPlayer2 && newPlayer2 !== oldPlayer2) ||
-                  (newRaw && newRaw !== oldRaw),
+                  (newRaw && newRaw !== oldRaw) ||
+                  (newM3u8 && newM3u8 !== oldM3u8) ||
+                  (newPlayer2M3u8 && newPlayer2M3u8 !== oldP2M3u8),
                 );
 
                 if (hasNewLinks) {
@@ -514,6 +540,8 @@ export class ScraperPipelineService {
                   if (newEmbed) inMovie.streams.watch_embed = newEmbed;
                   if (newPlayer2) inMovie.streams.player_2 = newPlayer2;
                   if (newRaw) inMovie.streams.watch_raw = newRaw;
+                  if (newM3u8) inMovie.streams.m3u8_url = newM3u8;
+                  if (newPlayer2M3u8) inMovie.streams.player_2_m3u8_url = newPlayer2M3u8;
 
                   inMovie.markModified('streams');
                   updatedStream = isChanged;
@@ -548,6 +576,7 @@ export class ScraperPipelineService {
 
           // 2. Existing Series in DB
           if (existingSeries) {
+            liveItems.push(mapSeriesToMediaItem(existingSeries));
             const titleUnchanged = existingSeries.full_title === item.fullTitle;
             if (titleUnchanged) {
               skippedCount++;
@@ -603,6 +632,7 @@ export class ScraperPipelineService {
             });
 
             await newSeriesDoc.save();
+            liveItems.push(mapSeriesToMediaItem(newSeriesDoc));
             newSeriesCount++;
             this.totalNewSeriesAdded++;
             console.log(
@@ -627,6 +657,7 @@ export class ScraperPipelineService {
             });
 
             await newMovieDoc.save();
+            liveItems.push(mapMovieToMediaItem(newMovieDoc));
             newMoviesCount++;
             this.totalNewMoviesAdded++;
             console.log(`🎬 [NEW MOVIE ADDED] ${item.displayName} -> Pushed to TOP!`);
@@ -634,6 +665,12 @@ export class ScraperPipelineService {
         } catch (itemErr: any) {
           console.warn(`[Scraper Pipeline] Error processing "${item.displayName}":`, itemErr.message);
         }
+      }
+
+      if (liveItems.length > 0) {
+        this.latestLiveItems = liveItems;
+        this.latestLiveItemsTime = Date.now();
+        console.log(`📡 [Scraper Pipeline] Synced ${liveItems.length} latest live releases matching website.`);
       }
 
       // If new movies/series or updated stream links were added, invalidate in-memory cache
@@ -737,6 +774,8 @@ export class ScraperPipelineService {
           const newEmb = (newEp.watch_1_embed || '').trim();
           const newP2 = (newEp.watch_2 || '').trim();
           const newRaw = (newEp.watch_1_raw || '').trim();
+          const newM3u8 = (newEp.m3u8_url || '').trim();
+          const newP2M3u8 = (newEp.player_2_m3u8_url || '').trim();
 
           if (newEmb && newEmb !== existingEp.watch_1_embed) {
             existingEp.watch_1_embed = newEmb;
@@ -748,6 +787,14 @@ export class ScraperPipelineService {
           }
           if (newRaw && newRaw !== existingEp.watch_1_raw) {
             existingEp.watch_1_raw = newRaw;
+            epChanged = true;
+          }
+          if (newM3u8 && newM3u8 !== existingEp.m3u8_url) {
+            existingEp.m3u8_url = newM3u8;
+            epChanged = true;
+          }
+          if (newP2M3u8 && newP2M3u8 !== existingEp.player_2_m3u8_url) {
+            existingEp.player_2_m3u8_url = newP2M3u8;
             epChanged = true;
           }
 
@@ -766,7 +813,7 @@ export class ScraperPipelineService {
     title: string,
   ): Promise<{
     type: 'movie' | 'series';
-    streams?: { watch_embed: string; watch_raw: string; player_2: string };
+    streams?: { watch_embed: string; watch_raw: string; player_2: string; m3u8_url?: string; player_2_m3u8_url?: string };
     seasons?: Array<{
       season_name: string;
       total_episodes: number;
@@ -775,6 +822,8 @@ export class ScraperPipelineService {
         watch_1_embed: string;
         watch_1_raw: string;
         watch_2: string;
+        m3u8_url?: string;
+        player_2_m3u8_url?: string;
       }>;
     }>;
   }> {
@@ -802,6 +851,8 @@ export class ScraperPipelineService {
         watch_1_embed: string;
         watch_1_raw: string;
         watch_2: string;
+        m3u8_url?: string;
+        player_2_m3u8_url?: string;
       }>
     > = {};
 
@@ -834,11 +885,28 @@ export class ScraperPipelineService {
             }
           }
 
+          let m3u8Url = '';
+          if (w1Emb) {
+            try {
+              m3u8Url = (await extractDirectM3u8(w1Emb)) || '';
+            } catch {}
+          }
+
+          let p2M3u8 = '';
+          const finalW2 = w2Emb || toEmbedLink(currentEpWatch2);
+          if (finalW2) {
+            try {
+              p2M3u8 = (await extractDirectM3u8(finalW2)) || '';
+            } catch {}
+          }
+
           seasonsMap[currentSeason].push({
             episode: currentEpLabel,
             watch_1_embed: w1Emb,
             watch_1_raw: w1Raw,
-            watch_2: w2Emb || toEmbedLink(currentEpWatch2),
+            watch_2: finalW2,
+            m3u8_url: m3u8Url,
+            player_2_m3u8_url: p2M3u8,
           });
         }
       }
@@ -1012,12 +1080,29 @@ export class ScraperPipelineService {
       }
     }
 
+    let m3u8Url = '';
+    if (wEmb) {
+      try {
+        m3u8Url = (await extractDirectM3u8(wEmb)) || '';
+      } catch {}
+    }
+
+    let p2M3u8 = '';
+    const finalP2 = p2Emb || toEmbedLink(player2Url);
+    if (finalP2) {
+      try {
+        p2M3u8 = (await extractDirectM3u8(finalP2)) || '';
+      } catch {}
+    }
+
     return {
       type: 'movie',
       streams: {
         watch_embed: wEmb,
         watch_raw: wRaw,
-        player_2: p2Emb || toEmbedLink(player2Url),
+        player_2: finalP2,
+        m3u8_url: m3u8Url,
+        player_2_m3u8_url: p2M3u8,
       },
     };
   }

@@ -1,9 +1,12 @@
 import { Movie, Series } from '../db';
 import { HomeFeed, MediaItem } from '../types';
+import { scraperPipelineService } from './scraperPipelineService';
 
 function extractYear(title: string): string {
-  const match = title.match(/\((\d{4})\)/);
-  return match ? match[1] : '2026';
+  const rangeMatch = title.match(/\b(?:19|20)\d{2}\s*[-–]\s*((?:19|20)\d{2})\b/);
+  if (rangeMatch) return rangeMatch[1];
+  const match = title.match(/\b(19\d{2}|20\d{2})\b/);
+  return match ? match[1] : '';
 }
 
 function detectCategory(title: string, fullTitle: string = ''): string {
@@ -56,8 +59,13 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
   let yearNum = typeof doc.year === 'number' && doc.year > 1900 ? doc.year : null;
   if (!yearNum) {
     const text = `${doc.full_title || ''} ${doc.title || ''}`;
-    const m = text.match(/\b(19\d{2}|20\d{2})\b/);
-    yearNum = m ? parseInt(m[1], 10) : 2026;
+    const rangeMatch = text.match(/\b(?:19|20)\d{2}\s*[-–]\s*((?:19|20)\d{2})\b/);
+    if (rangeMatch) {
+      yearNum = parseInt(rangeMatch[1], 10);
+    } else {
+      const m = text.match(/\b(19\d{2}|20\d{2})\b/);
+      yearNum = m ? parseInt(m[1], 10) : (doc.createdAt ? new Date(doc.createdAt).getFullYear() : 2026);
+    }
   }
 
   const isIndian = determineIsIndian(doc);
@@ -93,12 +101,14 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     genres: [region, cat, 'HD'],
     duration: 'Full Movie',
     quality,
-    streamUrl: undefined,
+    streamUrl: doc.streams?.m3u8_url || undefined,
+    m3u8_url: doc.streams?.m3u8_url || undefined,
+    player_2_m3u8_url: doc.streams?.player_2_m3u8_url || undefined,
   };
 }
 
 const ADULT_REGEX =
-  /\b18\+|\b18\s*\+|adult|erotic|sex|\bhot\b|sensual|softcore|hotshots|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams\b/i;
+  /\b18\+|\b18\s*\+|adult|erotic|sex|\bhot\b|sensual|softcore|hotshots|ullu|kooku|primeshots|voovi|cineprime|moodx|chikooflix|hunters|nuefliks|besharams|atrangii|papa['’]?s?[\s\-_]*friends?\b/i;
 
 export function mapSeriesToMediaItem(doc: any): MediaItem {
   const year = extractYear(doc.title);
@@ -163,8 +173,10 @@ export class ContentService {
 
     const adultFilter = { $not: ADULT_REGEX };
     const query: any = {
-      title: adultFilter,
-      full_title: adultFilter,
+      $or: [
+        { title: /\btoxic\b/i },
+        { title: adultFilter, full_title: adultFilter },
+      ],
     };
 
     if (options.search) {
@@ -242,8 +254,10 @@ export class ContentService {
 
     const adultFilter = { $not: ADULT_REGEX };
     const query: any = {
-      title: adultFilter,
-      full_title: adultFilter,
+      $or: [
+        { title: /\btoxic\b/i },
+        { title: adultFilter, full_title: adultFilter },
+      ],
     };
 
     if (options.search) {
@@ -292,11 +306,23 @@ export class ContentService {
   }
 
   async getMovieById(id: string): Promise<any | null> {
-    return Movie.findOne({ id }).lean();
+    const movie = await Movie.findOne({ id }).lean();
+    if (movie) {
+      const text = `${movie.title || ''} ${movie.full_title || ''} ${movie.movie_page_url || ''}`;
+      if (/\btoxic\b/i.test(text)) return movie; // Exception: Keep Toxic in App
+      if (ADULT_REGEX.test(text)) return null;
+    }
+    return movie;
   }
 
   async getSeriesById(id: string): Promise<any | null> {
-    return Series.findOne({ id }).lean();
+    const series = await Series.findOne({ id }).lean();
+    if (series) {
+      const text = `${series.title || ''} ${series.full_title || ''} ${series.movie_page_url || ''}`;
+      if (/\btoxic\b/i.test(text)) return series; // Exception: Keep Toxic in App
+      if (ADULT_REGEX.test(text)) return null;
+    }
+    return series;
   }
 
   /**
@@ -313,8 +339,10 @@ export class ContentService {
 
     const adultFilter = { $not: ADULT_REGEX };
     const query: any = {
-      title: adultFilter,
-      full_title: adultFilter,
+      $or: [
+        { title: /\btoxic\b/i },
+        { title: adultFilter, full_title: adultFilter },
+      ],
     };
 
     if (options.search) {
@@ -327,6 +355,44 @@ export class ContentService {
           ],
         },
       ];
+    }
+
+    if (!options.search) {
+      try {
+        const liveItems = await scraperPipelineService.getLatestLiveItems();
+        if (liveItems && liveItems.length > 0) {
+          if (skip < liveItems.length) {
+            const slice = liveItems.slice(skip, skip + limit);
+            if (slice.length < limit) {
+              const needed = limit - slice.length;
+              const liveTitles = new Set(liveItems.map((i) => i.title.toLowerCase()));
+              const olderMovies = await Movie.find(query)
+                .sort({ year: -1, updatedAt: -1, _id: -1 })
+                .select('id title full_title poster_url poster_filename year is_indian streams')
+                .limit(needed + 30)
+                .lean();
+              const olderSeries = await Series.find(query)
+                .sort({ updatedAt: -1, _id: -1 })
+                .select('id title full_title poster_url poster_filename seasons')
+                .limit(needed + 30)
+                .lean();
+              const olderCombined = [
+                ...olderMovies.map(mapMovieToMediaItem),
+                ...olderSeries.map(mapSeriesToMediaItem),
+              ].filter((i) => !liveTitles.has(i.title.toLowerCase()));
+              slice.push(...olderCombined.slice(0, needed));
+            }
+            return {
+              items: slice,
+              total: Math.max(12469, liveItems.length),
+              page,
+              totalPages: Math.ceil(12469 / limit),
+            };
+          }
+        }
+      } catch (err: any) {
+        console.warn('Could not fetch live scraped latest feed:', err.message);
+      }
     }
 
     const halfLimit = Math.ceil(limit / 2);
@@ -374,8 +440,10 @@ export class ContentService {
     const projection = 'id title full_title poster_url poster_filename year is_indian streams';
     const adultFilter = { $not: ADULT_REGEX };
     const baseMovieFilter = {
-      title: adultFilter,
-      full_title: adultFilter,
+      $or: [
+        { title: /\btoxic\b/i },
+        { title: adultFilter, full_title: adultFilter },
+      ],
     };
 
     const [latestMovies, indianMovies, nonIndianMovies, bollywood, southDubbed, hollywood, webSeries] = await Promise.all([
@@ -437,7 +505,15 @@ export class ContentService {
         .lean(),
     ]);
 
-    const latestItems = latestMovies.map(mapMovieToMediaItem);
+    let latestItems = latestMovies.map(mapMovieToMediaItem);
+    try {
+      const liveItems = await scraperPipelineService.getLatestLiveItems();
+      if (liveItems && liveItems.length > 0) {
+        latestItems = liveItems.slice(0, 20);
+      }
+    } catch (err: any) {
+      console.warn('Could not fetch live releases for home feed:', err.message);
+    }
     const indianItems = indianMovies.map(mapMovieToMediaItem);
     const nonIndianItems = nonIndianMovies.map(mapMovieToMediaItem);
     const bollywoodItems = bollywood.map(mapMovieToMediaItem);

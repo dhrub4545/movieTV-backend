@@ -19,6 +19,8 @@ export interface IStreams {
   watch_embed?: string;
   watch_raw?: string;
   player_2?: string;
+  m3u8_url?: string;
+  player_2_m3u8_url?: string;
 }
 
 export interface IMovie extends Document {
@@ -41,6 +43,8 @@ export interface IEpisode {
   watch_1_embed?: string;
   watch_1_raw?: string;
   watch_2?: string;
+  m3u8_url?: string;
+  player_2_m3u8_url?: string;
 }
 
 export interface ISeason {
@@ -67,6 +71,8 @@ const StreamsSchema = new Schema<IStreams>(
     watch_embed: { type: String, default: '' },
     watch_raw: { type: String, default: '' },
     player_2: { type: String, default: '' },
+    m3u8_url: { type: String, default: '' },
+    player_2_m3u8_url: { type: String, default: '' },
   },
   { _id: false },
 );
@@ -77,6 +83,8 @@ const EpisodeSchema = new Schema<IEpisode>(
     watch_1_embed: { type: String, default: '' },
     watch_1_raw: { type: String, default: '' },
     watch_2: { type: String, default: '' },
+    m3u8_url: { type: String, default: '' },
+    player_2_m3u8_url: { type: String, default: '' },
   },
   { _id: false },
 );

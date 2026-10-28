@@ -17,6 +17,8 @@ export interface MediaItem {
   genres: string[];
   duration?: string; // e.g. "2h 15m" or "Season 1"
   streamUrl?: string; // Direct preview or pre-resolved stream if available
+  m3u8_url?: string; // Server 1 direct .m3u8 link from DB
+  player_2_m3u8_url?: string; // Server 2 direct .m3u8 link from DB
   quality?: string; // 'HDCAM' | 'HD' | '4K'
   seasons?: any[];
 }
@@ -60,5 +62,7 @@ export interface StreamResolveResponse {
   tmdbId?: number;
   type: MediaType;
   sources: StreamSource[];
+  m3u8_url?: string;
+  player_2_m3u8_url?: string;
   subtitles: SubtitleTrack[];
 }

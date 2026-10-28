@@ -1,28 +1,108 @@
-import axios from 'axios';
 import mongoose from 'mongoose';
 import { Movie, Series } from '../db';
 import { StreamResolveResponse, StreamSource, SubtitleTrack } from '../types';
+import { extractDirectM3u8, unpackDeanEdwards } from './m3u8Extractor';
 import { scraperPipelineService } from './scraperPipelineService';
 
-function unpackDeanEdwards(packed: string): string {
+export { extractDirectM3u8, unpackDeanEdwards };
+
+/**
+ * Saves an extracted direct .m3u8 link into the MongoDB database for Movie or Series episode
+ * Supports both Player 1 (m3u8_url) and Player 2 (player_2_m3u8_url) separately!
+ */
+export async function saveDirectM3u8(params: {
+  id?: string;
+  title?: string;
+  type?: 'movie' | 'tv' | 'series';
+  season?: number;
+  episode?: number | string;
+  m3u8Url: string;
+  player?: 1 | 2;
+}): Promise<boolean> {
+  const { id, title, type = 'movie', season = 1, episode = 1, m3u8Url, player = 1 } = params;
+  if (!m3u8Url || typeof m3u8Url !== 'string') return false;
+
   try {
-    const regex =
-      /eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)/s;
-    const match = packed.match(regex);
-    if (!match) return '';
-    let [_, p, aStr, cStr, kStr] = match;
-    let a = parseInt(aStr, 10);
-    let c = parseInt(cStr, 10);
-    const k = kStr.split('|');
-    while (c--) {
-      if (k[c]) {
-        p = p.replace(new RegExp('\\b' + c.toString(a) + '\\b', 'g'), k[c]);
+    const cleanUrl = m3u8Url.trim();
+    const fieldName = player === 2 ? 'streams.player_2_m3u8_url' : 'streams.m3u8_url';
+
+    if (type === 'movie' || (!type && !season && !episode)) {
+      const orList: any[] = [];
+      if (id) {
+        orList.push({ id: String(id) });
+        if (mongoose.Types.ObjectId.isValid(id) && String(id).length === 24) {
+          orList.push({ _id: new mongoose.Types.ObjectId(id) });
+        }
+      }
+      if (title) {
+        const clean = title.replace(/\(\d{4}\)/g, '').trim();
+        orList.push({ title: new RegExp('^' + title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+        orList.push({ title: new RegExp('^' + clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+      }
+      if (orList.length > 0) {
+        const query = { $or: orList };
+        const updateObj: any = {};
+        updateObj[fieldName] = cleanUrl;
+        const res = await Movie.updateOne(query, { $set: updateObj }, { timestamps: false });
+        console.log(`💾 Saved Player ${player} direct M3U8 to Movie in DB: ${title || id} -> ${cleanUrl}`);
+        return res.modifiedCount > 0 || res.matchedCount > 0;
+      }
+    } else {
+      const orList: any[] = [];
+      if (id) {
+        orList.push({ id: String(id) });
+        if (mongoose.Types.ObjectId.isValid(id) && String(id).length === 24) {
+          orList.push({ _id: new mongoose.Types.ObjectId(id) });
+        }
+      }
+      if (title) {
+        const clean = title.replace(/\(\d{4}\)/g, '').trim();
+        orList.push({ title: new RegExp('^' + title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+        orList.push({ title: new RegExp('^' + clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+      }
+      if (orList.length > 0) {
+        const sQuery = { $or: orList };
+        const sDoc = await Series.findOne(sQuery);
+        if (sDoc && sDoc.seasons && sDoc.seasons.length > 0) {
+          const sIdx = Math.max(0, season - 1);
+          const targetSeason = sDoc.seasons[sIdx] || sDoc.seasons[0];
+          if (targetSeason && targetSeason.episodes) {
+            let targetEp: any = null;
+            if (typeof episode === 'number') {
+              const epIdx = Math.max(0, episode - 1);
+              targetEp = targetSeason.episodes[epIdx];
+            } else if (typeof episode === 'string') {
+              targetEp = targetSeason.episodes.find((e: any) =>
+                e.episode.toLowerCase().includes(episode.toLowerCase()),
+              );
+            }
+            if (!targetEp && targetSeason.episodes.length > 0) {
+              targetEp = targetSeason.episodes[0];
+            }
+            if (targetEp) {
+              if (player === 2) {
+                targetEp.player_2_m3u8_url = cleanUrl;
+              } else {
+                targetEp.m3u8_url = cleanUrl;
+              }
+              await Series.updateOne(
+                { _id: sDoc._id },
+                { $set: { seasons: sDoc.seasons } },
+                { timestamps: false },
+              );
+              console.log(
+                `💾 Saved Player ${player} direct M3U8 to Series episode in DB: ${sDoc.title} S${season}:E${episode} -> ${cleanUrl}`,
+              );
+              return true;
+            }
+          }
+        }
       }
     }
-    return p;
-  } catch {
-    return '';
+  } catch (err: any) {
+    console.warn(`Failed to save direct M3U8 for Player ${player} to DB:`, err.message);
   }
+  return false;
 }
 
 export class StreamResolverService {
@@ -30,9 +110,24 @@ export class StreamResolverService {
   private cache = new Map<string, { data: StreamResolveResponse; expiresAt: number }>();
   private readonly CACHE_TTL_MS = 30 * 60 * 1000;
 
+  async saveDirectM3u8(params: {
+    id?: string;
+    title?: string;
+    type?: 'movie' | 'tv' | 'series';
+    season?: number;
+    episode?: number | string;
+    m3u8Url: string;
+    player?: 1 | 2;
+  }): Promise<boolean> {
+    return saveDirectM3u8(params);
+  }
+
   /**
    * Resolves playable stream options for a given movie / series from MongoDB Atlas.
-   * Automatically unpacks embeds to extract direct M3U8 links for high-speed playback!
+   * Extracts and saves 2 direct .m3u8 links in the database:
+   * - Player 1 direct M3U8 (from Server 1 / watch_embed)
+   * - Player 2 direct M3U8 (from Server 2 / player_2)
+   * Both are preserved and returned cleanly for instant direct streaming!
    */
   async resolveStream(params: {
     id?: string;
@@ -60,7 +155,7 @@ export class StreamResolverService {
           const query: any = mongoose.Types.ObjectId.isValid(id)
             ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { id }] }
             : { id };
-          doc = await Movie.findOne(query).select('title streams full_title').lean();
+          doc = await Movie.findOne(query).select('id _id title streams full_title').lean();
         }
         if (!doc && title) {
           const clean = title.replace(/\(\d{4}\)/g, '').trim();
@@ -71,12 +166,57 @@ export class StreamResolverService {
               { full_title: new RegExp(clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
             ],
           })
-            .select('title streams full_title')
+            .select('id _id title streams full_title')
             .lean();
         }
         if (doc) {
           targetTitle = doc.title;
-          streams = doc.streams;
+          streams = {
+            watch_embed: doc.streams?.watch_embed || '',
+            player_2: doc.streams?.player_2 || '',
+            m3u8_url: doc.streams?.m3u8_url || '',
+            player_2_m3u8_url: doc.streams?.player_2_m3u8_url || '',
+          };
+
+          const docId = (doc as any).id || (doc as any)._id?.toString();
+
+          // If Player 1 .m3u8 is not yet stored, extract it from watch_embed and save to DB!
+          if (!streams.m3u8_url && streams.watch_embed) {
+            try {
+              const directM3u8 = await extractDirectM3u8(streams.watch_embed);
+              if (directM3u8) {
+                streams.m3u8_url = directM3u8;
+                await saveDirectM3u8({
+                  id: docId,
+                  title: doc.title,
+                  type: 'movie',
+                  player: 1,
+                  m3u8Url: directM3u8,
+                });
+              }
+            } catch (extErr: any) {
+              console.warn('On-the-fly Player 1 M3U8 extraction error:', extErr.message);
+            }
+          }
+
+          // If Player 2 .m3u8 is not yet stored, extract it from player_2 and save to DB!
+          if (!streams.player_2_m3u8_url && streams.player_2) {
+            try {
+              const p2M3u8 = await extractDirectM3u8(streams.player_2);
+              if (p2M3u8) {
+                streams.player_2_m3u8_url = p2M3u8;
+                await saveDirectM3u8({
+                  id: docId,
+                  title: doc.title,
+                  type: 'movie',
+                  player: 2,
+                  m3u8Url: p2M3u8,
+                });
+              }
+            } catch (extErr: any) {
+              console.warn('On-the-fly Player 2 M3U8 extraction error:', extErr.message);
+            }
+          }
         }
       } else {
         let sDoc = null;
@@ -84,7 +224,7 @@ export class StreamResolverService {
           const query: any = mongoose.Types.ObjectId.isValid(id)
             ? { $or: [{ _id: new mongoose.Types.ObjectId(id) }, { id }] }
             : { id };
-          sDoc = await Series.findOne(query).select('title seasons').lean();
+          sDoc = await Series.findOne(query).select('id _id title seasons').lean();
         }
         if (!sDoc && title) {
           const clean = title.replace(/\(\d{4}\)/g, '').trim();
@@ -94,7 +234,7 @@ export class StreamResolverService {
               { title: new RegExp('^' + clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
             ],
           })
-            .select('title seasons')
+            .select('id _id title seasons')
             .lean();
         }
         if (sDoc && sDoc.seasons && sDoc.seasons.length > 0) {
@@ -105,9 +245,55 @@ export class StreamResolverService {
           const ep = targetSeason.episodes[epIdx] || targetSeason.episodes[0];
           if (ep) {
             streams = {
-              watch_embed: ep.watch_1_embed,
-              player_2: ep.watch_2,
+              watch_embed: ep.watch_1_embed || '',
+              player_2: ep.watch_2 || '',
+              m3u8_url: ep.m3u8_url || '',
+              player_2_m3u8_url: ep.player_2_m3u8_url || '',
             };
+
+            const sDocId = (sDoc as any).id || (sDoc as any)._id?.toString();
+
+            // If Player 1 .m3u8 is not yet stored, extract it from watch_1_embed and save to DB!
+            if (!streams.m3u8_url && streams.watch_embed) {
+              try {
+                const directM3u8 = await extractDirectM3u8(streams.watch_embed);
+                if (directM3u8) {
+                  streams.m3u8_url = directM3u8;
+                  await saveDirectM3u8({
+                    id: sDocId,
+                    title: sDoc.title,
+                    type: 'series',
+                    season,
+                    episode,
+                    player: 1,
+                    m3u8Url: directM3u8,
+                  });
+                }
+              } catch (extErr: any) {
+                console.warn('On-the-fly Player 1 M3U8 extraction error for episode:', extErr.message);
+              }
+            }
+
+            // If Player 2 .m3u8 is not yet stored, extract it from watch_2 and save to DB!
+            if (!streams.player_2_m3u8_url && streams.player_2) {
+              try {
+                const p2M3u8 = await extractDirectM3u8(streams.player_2);
+                if (p2M3u8) {
+                  streams.player_2_m3u8_url = p2M3u8;
+                  await saveDirectM3u8({
+                    id: sDocId,
+                    title: sDoc.title,
+                    type: 'series',
+                    season,
+                    episode,
+                    player: 2,
+                    m3u8Url: p2M3u8,
+                  });
+                }
+              } catch (extErr: any) {
+                console.warn('On-the-fly Player 2 M3U8 extraction error for episode:', extErr.message);
+              }
+            }
           }
         }
       }
@@ -116,16 +302,6 @@ export class StreamResolverService {
     }
 
     const sources: StreamSource[] = [];
-
-    // Strictly keep only the streaming links from the DB (excluding raw link)
-    // 2 links available -> 2 play options
-    // 1 link available -> 1 play option
-    // No blank play options!
-    const rawCandidates: string[] = [];
-    if (streams) {
-      if (typeof streams.watch_embed === 'string') rawCandidates.push(streams.watch_embed.trim());
-      if (typeof streams.player_2 === 'string') rawCandidates.push(streams.player_2.trim());
-    }
 
     const normalizeStreamUrl = (url: string): string => {
       if (!url) return '';
@@ -139,38 +315,66 @@ export class StreamResolverService {
       return url.length > 0 && !url.includes('/file/') && url.startsWith('http');
     };
 
-    const validLinks: string[] = [];
-    for (const raw of rawCandidates) {
-      const normalized = normalizeStreamUrl(raw);
-      if (isLinkValid(normalized) && !validLinks.includes(normalized)) {
-        validLinks.push(normalized);
-      }
-    }
-
-    // Keep at most 2 streaming links (strictly from DB, excluding raw links)
-    // 2 links available in DB -> 2 play options
-    // 1 link available in DB -> 1 play option
-    // No blank play options!
-    const finalLinks = validLinks.slice(0, 2);
-
-    for (let i = 0; i < finalLinks.length; i++) {
-      const url = finalLinks[i];
-      const label = i === 0 ? '🎬 Server 1: Primary Stream' : '🍿 Server 2: Alternate Player';
+    // SERVER 1 (Primary Stream):
+    // Use the direct .m3u8 link from the DB
+    if (streams && streams.m3u8_url && streams.m3u8_url.includes('.m3u8')) {
       sources.push({
-        quality: label,
-        url,
-        format: url.includes('.m3u8')
-          ? 'hls'
-          : url.includes('.mp4')
-            ? 'mp4'
-            : 'embed',
+        quality: '🎬 Server 1: Primary Stream (Direct HLS)',
+        url: streams.m3u8_url.trim(),
+        format: 'hls',
         headers: {
-          Referer: `${scraperPipelineService.getBaseUrl()}/`,
+          Referer: 'https://hdstream4u.com/',
+          Origin: 'https://hdstream4u.com',
         },
       });
     }
 
-    // Only if DB had literally 0 valid links, provide 1 fallback so player is never blank
+    // SERVER 2 (Alternate Player):
+    // Use the direct .m3u8 link from the DB
+    if (streams && streams.player_2_m3u8_url && streams.player_2_m3u8_url.includes('.m3u8')) {
+      sources.push({
+        quality: '🍿 Server 2: Alternate Player (Direct HLS)',
+        url: streams.player_2_m3u8_url.trim(),
+        format: 'hls',
+        headers: {
+          Referer: 'https://hubstream.art/',
+          Origin: 'https://hubstream.art',
+        },
+      });
+    }
+
+    // Only if DB has ZERO .m3u8 links, fallback to raw embed stream links
+    if (sources.length === 0) {
+      if (streams && streams.watch_embed) {
+        const normW1 = normalizeStreamUrl(streams.watch_embed);
+        if (isLinkValid(normW1)) {
+          sources.push({
+            quality: '🎬 Server 1: Primary Stream',
+            url: normW1,
+            format: normW1.includes('.m3u8') ? 'hls' : 'embed',
+            headers: {
+              Referer: `${scraperPipelineService.getBaseUrl()}/`,
+            },
+          });
+        }
+      }
+
+      if (streams && streams.player_2) {
+        const normP2 = normalizeStreamUrl(streams.player_2);
+        if (isLinkValid(normP2)) {
+          sources.push({
+            quality: '🍿 Server 2: Alternate Player',
+            url: normP2,
+            format: normP2.includes('.m3u8') ? 'hls' : 'embed',
+            headers: {
+              Referer: `${scraperPipelineService.getBaseUrl()}/`,
+            },
+          });
+        }
+      }
+    }
+
+    // Fallback if DB had 0 links
     if (sources.length === 0) {
       sources.push({
         quality: '🎬 Server 1: Primary Stream',
@@ -196,14 +400,20 @@ export class StreamResolverService {
       title: targetTitle,
       type,
       sources,
+      m3u8_url: streams && streams.m3u8_url && streams.m3u8_url.includes('.m3u8') ? streams.m3u8_url.trim() : undefined,
+      player_2_m3u8_url: streams && streams.player_2_m3u8_url && streams.player_2_m3u8_url.includes('.m3u8') ? streams.player_2_m3u8_url.trim() : undefined,
       subtitles,
     };
 
-    // Store in cache
     this.cache.set(cacheKey, { data: result, expiresAt: Date.now() + this.CACHE_TTL_MS });
-
     return result;
+  }
+
+  clearCache(): void {
+    this.cache.clear();
   }
 }
 
 export const streamResolverService = new StreamResolverService();
+
+
