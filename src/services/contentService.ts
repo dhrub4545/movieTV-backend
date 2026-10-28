@@ -193,7 +193,7 @@ export class ContentService {
       const cat = options.category.toLowerCase().trim();
       if (cat === 'indian') {
         query.is_indian = true;
-      } else if (cat === 'non-indian' || cat === 'non_indian' || cat === 'international') {
+      } else if (cat === 'global' || cat === 'non-indian' || cat === 'non_indian' || cat === 'international') {
         query.is_indian = false;
       } else {
         query.$and = [
@@ -207,13 +207,45 @@ export class ContentService {
       }
     }
 
-    // Sort latest movies first by release year, then by updatedAt, createdAt
+    let livePrepended: MediaItem[] = [];
+    if (!options.search && page === 1) {
+      try {
+        const liveItems = await scraperPipelineService.getLatestLiveItems();
+        if (liveItems && liveItems.length > 0) {
+          const cat = options.category?.toLowerCase()?.trim();
+          if (cat === 'indian') {
+            livePrepended = liveItems.filter((i) => (i.type === 'movie' || !i.type) && i.isIndian);
+          } else if (cat === 'global' || cat === 'non-indian' || cat === 'non_indian' || cat === 'international') {
+            livePrepended = liveItems.filter((i) => (i.type === 'movie' || !i.type) && !i.isIndian);
+          } else {
+            livePrepended = liveItems.filter((i) => i.type === 'movie' || !i.type);
+          }
+        }
+      } catch (err: any) {
+        console.warn('Could not fetch live releases for movies:', err.message);
+      }
+    }
+
+    // Strictly sort by latest website release order (newest updated/created first)
     const findQuery = Movie.find(query)
-      .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .select('id title full_title poster_url poster_filename year is_indian streams')
       .skip(skip)
       .limit(limit)
       .lean();
+
+    if (livePrepended.length > 0) {
+      const liveTitles = new Set(livePrepended.map((i) => i.title.toLowerCase()));
+      const docs = await findQuery;
+      const older = docs.map(mapMovieToMediaItem).filter((i) => !liveTitles.has(i.title.toLowerCase()));
+      const combined = [...livePrepended, ...older].slice(0, limit);
+      return {
+        items: combined,
+        total: Math.max(11182, combined.length),
+        page,
+        totalPages: Math.ceil(11182 / limit),
+      };
+    }
 
     // Cache overall total if searching or filtering is not active
     const shouldCount = options.search || options.category;
@@ -272,13 +304,38 @@ export class ContentService {
       ];
     }
 
-    // Sort by updatedAt: -1 and createdAt: -1 so new episodes or new series appear at the TOP!
+    let livePrepended: MediaItem[] = [];
+    if (!options.search && page === 1) {
+      try {
+        const liveItems = await scraperPipelineService.getLatestLiveItems();
+        if (liveItems && liveItems.length > 0) {
+          livePrepended = liveItems.filter((i) => i.type === 'tv' || (i as any).type === 'series');
+        }
+      } catch (err: any) {
+        console.warn('Could not fetch live releases for series:', err.message);
+      }
+    }
+
+    // Sort strictly by latest website release order (newest updated/created first)
     const findQuery = Series.find(query)
       .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .select('id title full_title poster_url poster_filename seasons')
       .skip(skip)
       .limit(limit)
       .lean();
+
+    if (livePrepended.length > 0) {
+      const liveTitles = new Set(livePrepended.map((i) => i.title.toLowerCase()));
+      const docs = await findQuery;
+      const older = docs.map(mapSeriesToMediaItem).filter((i) => !liveTitles.has(i.title.toLowerCase()));
+      const combined = [...livePrepended, ...older].slice(0, limit);
+      return {
+        items: combined,
+        total: Math.max(1282, combined.length),
+        page,
+        totalPages: Math.ceil(1282 / limit),
+      };
+    }
 
     let total = 1282;
     if (options.search) {
@@ -539,44 +596,20 @@ export class ContentService {
       featured,
       sections: [
         {
-          title: '🔥 Latest Releases (Newest First)',
-          category: 'Latest',
-          type: 'movie',
-          items: latestItems,
-        },
-        {
           title: '🇮🇳 Latest Indian Movies',
           category: 'Indian',
           type: 'movie',
           items: indianItems.length > 0 ? indianItems : latestItems,
         },
         {
-          title: '🌍 Latest Non-Indian Movies',
-          category: 'Non-Indian',
+          title: '🌍 Latest Global Movies',
+          category: 'Global',
           type: 'movie',
           items: nonIndianItems.length > 0 ? nonIndianItems : latestItems,
         },
         {
-          title: '🎬 Bollywood & Hindi Cinema',
-          category: 'Bollywood',
-          type: 'movie',
-          items: bollywoodItems.length > 0 ? bollywoodItems : latestItems,
-        },
-        {
-          title: '🌟 South Indian & Dubbed Hits',
-          category: 'South Dubbed',
-          type: 'movie',
-          items: southItems.length > 0 ? southItems : latestItems,
-        },
-        {
-          title: '🍿 Hollywood & Dual Audio Blockbusters',
-          category: 'Hollywood',
-          type: 'movie',
-          items: hollywoodItems.length > 0 ? hollywoodItems : latestItems,
-        },
-        {
-          title: '📺 Web Series & Shows (All Episodes)',
-          category: 'Web Series',
+          title: '📺 Web Series & Shows',
+          category: 'Series',
           type: 'tv',
           items: seriesItems,
         },

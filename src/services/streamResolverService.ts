@@ -315,6 +315,15 @@ export class StreamResolverService {
       return url.length > 0 && !url.includes('/file/') && url.startsWith('http');
     };
 
+    const isM3u8TokenValid = (url: string) => {
+      if (!url) return false;
+      const match = url.match(/[?&]kx=(\d+)/);
+      if (!match) return true;
+      const kx = parseInt(match[1], 10);
+      const nowSec = Math.floor(Date.now() / 1000);
+      return kx > nowSec + 180;
+    };
+
     // SERVER 1 (Primary Stream):
     // Use the direct .m3u8 link from the DB
     if (streams && streams.m3u8_url && streams.m3u8_url.includes('.m3u8')) {
@@ -330,8 +339,8 @@ export class StreamResolverService {
     }
 
     // SERVER 2 (Alternate Player):
-    // Use the direct .m3u8 link from the DB
-    if (streams && streams.player_2_m3u8_url && streams.player_2_m3u8_url.includes('.m3u8')) {
+    // Use the direct .m3u8 link from the DB if its token is valid; otherwise extract fresh live m3u8 on-the-fly!
+    if (streams && streams.player_2_m3u8_url && streams.player_2_m3u8_url.includes('.m3u8') && isM3u8TokenValid(streams.player_2_m3u8_url)) {
       sources.push({
         quality: '🍿 Server 2: Alternate Player (Direct HLS)',
         url: streams.player_2_m3u8_url.trim(),
@@ -341,31 +350,50 @@ export class StreamResolverService {
           Origin: 'https://hubstream.art',
         },
       });
-    }
-
-    // Only if DB has ZERO .m3u8 links, fallback to raw embed stream links
-    if (sources.length === 0) {
-      if (streams && streams.watch_embed) {
-        const normW1 = normalizeStreamUrl(streams.watch_embed);
-        if (isLinkValid(normW1)) {
-          sources.push({
-            quality: '🎬 Server 1: Primary Stream',
-            url: normW1,
-            format: normW1.includes('.m3u8') ? 'hls' : 'embed',
-            headers: {
-              Referer: `${scraperPipelineService.getBaseUrl()}/`,
-            },
-          });
+    } else if (streams && streams.player_2) {
+      let freshP2: string | null = null;
+      try {
+        freshP2 = await extractDirectM3u8(streams.player_2);
+        if (freshP2) {
+          streams.player_2_m3u8_url = freshP2;
         }
-      }
+      } catch {}
 
-      if (streams && streams.player_2) {
+      if (freshP2) {
+        sources.push({
+          quality: '🍿 Server 2: Alternate Player (Direct HLS)',
+          url: freshP2.trim(),
+          format: 'hls',
+          headers: {
+            Referer: 'https://hubstream.art/',
+            Origin: 'https://hubstream.art',
+          },
+        });
+      } else {
         const normP2 = normalizeStreamUrl(streams.player_2);
         if (isLinkValid(normP2)) {
           sources.push({
             quality: '🍿 Server 2: Alternate Player',
             url: normP2,
-            format: normP2.includes('.m3u8') ? 'hls' : 'embed',
+            format: 'embed',
+            headers: {
+              Referer: 'https://hubstream.art/',
+              Origin: 'https://hubstream.art',
+            },
+          });
+        }
+      }
+    }
+
+    // If Server 1 was not added yet, fallback to raw embed stream link
+    if (!sources.some((s) => s.quality.includes('Server 1'))) {
+      if (streams && streams.watch_embed) {
+        const normW1 = normalizeStreamUrl(streams.watch_embed);
+        if (isLinkValid(normW1)) {
+          sources.unshift({
+            quality: '🎬 Server 1: Primary Stream',
+            url: normW1,
+            format: normW1.includes('.m3u8') ? 'hls' : 'embed',
             headers: {
               Referer: `${scraperPipelineService.getBaseUrl()}/`,
             },

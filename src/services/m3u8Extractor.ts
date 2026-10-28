@@ -70,9 +70,25 @@ function getHubstreamIV(hash: string): Buffer {
 
 export async function extractHubstreamM3u8(url: string): Promise<string | null> {
   try {
+    let videoId = '';
     const hashMatch = url.match(/#([a-zA-Z0-9_-]+)/);
-    if (!hashMatch) return null;
-    const videoId = hashMatch[1];
+    if (hashMatch) {
+      videoId = hashMatch[1];
+    } else {
+      const pathMatch = url.match(/\/(?:meb|unl|video|stream)\/([a-zA-Z0-9_-]+)/);
+      if (pathMatch) {
+        videoId = pathMatch[1];
+      } else {
+        const idMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+        if (idMatch) {
+          videoId = idMatch[1];
+        } else {
+          const slugMatch = url.match(/hubstream\.[a-z]+\/([a-zA-Z0-9_-]{5,})/);
+          if (slugMatch) videoId = slugMatch[1];
+        }
+      }
+    }
+    if (!videoId) return null;
     const apiUrl = `https://hubstream.art/api/v1/video?id=${videoId}&w=1920&h=1080`;
 
     let res: any = null;
@@ -126,7 +142,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
   if (targetUrl.includes('/file/')) targetUrl = targetUrl.replace('/file/', '/embed/');
 
   // 1. Hubstream AES video extraction
-  if (targetUrl.includes('hubstream') && targetUrl.includes('#')) {
+  if (targetUrl.includes('hubstream') || targetUrl.includes('/meb/') || targetUrl.includes('/unl/') || targetUrl.includes('#')) {
     const hs = await extractHubstreamM3u8(targetUrl);
     if (hs) return hs;
   }

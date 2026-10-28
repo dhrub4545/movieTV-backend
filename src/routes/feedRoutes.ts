@@ -63,16 +63,16 @@ feedRouter.get('/movies/indian', async (req, res) => {
 });
 
 // GET /api/feed/movies/non-indian?page=1&limit=40&search=...
-feedRouter.get('/movies/non-indian', async (req, res) => {
+feedRouter.get(['/movies/non-indian', '/movies/global'], async (req, res) => {
   try {
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 40;
     const search = req.query.search as string | undefined;
 
-    const result = await contentService.getMovies({ page, limit, category: 'non-indian', search });
+    const result = await contentService.getMovies({ page, limit, category: 'global', search });
     res.json(result.items);
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to fetch Non-Indian movies', message: err.message });
+    res.status(500).json({ error: 'Failed to fetch Global movies', message: err.message });
   }
 });
 
