@@ -150,15 +150,49 @@ export class ContentService {
   private homeFeedCacheTime = 0;
   private readonly CACHE_TTL_MS = 5 * 60 * 1000;
 
+  // In-memory cache for queries (TTL: 3 minutes) with max 300 entries to prevent memory bloat
+  private queryCache = new Map<string, { data: any; expiresAt: number }>();
+  private inFlight = new Map<string, Promise<any>>();
+  private readonly QUERY_CACHE_TTL_MS = 3 * 60 * 1000;
+  private readonly MAX_CACHE_ENTRIES = 300;
+
   // Cached total counts to avoid expensive countDocuments on every page
   private totalMoviesCache: number | null = null;
   private totalSeriesCache: number | null = null;
+
+  private async getOrSetCache<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
+    const cached = this.queryCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data as T;
+    }
+    const running = this.inFlight.get(key);
+    if (running) {
+      return running as Promise<T>;
+    }
+    const promise = (async () => {
+      try {
+        const result = await fetcher();
+        if (this.queryCache.size >= this.MAX_CACHE_ENTRIES) {
+          const oldestKey = this.queryCache.keys().next().value;
+          if (oldestKey) this.queryCache.delete(oldestKey);
+        }
+        this.queryCache.set(key, { data: result, expiresAt: Date.now() + ttlMs });
+        return result;
+      } finally {
+        this.inFlight.delete(key);
+      }
+    })();
+    this.inFlight.set(key, promise);
+    return promise;
+  }
 
   invalidateCache(): void {
     this.cachedHomeFeed = null;
     this.homeFeedCacheTime = 0;
     this.totalMoviesCache = null;
     this.totalSeriesCache = null;
+    this.queryCache.clear();
+    this.inFlight.clear();
   }
 
   async getMovies(options: {
@@ -169,110 +203,116 @@ export class ContentService {
   }): Promise<{ items: MediaItem[]; total: number; page: number; totalPages: number }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
-    const skip = (page - 1) * limit;
+    const cat = (options.category || 'all').toLowerCase().trim();
+    const search = (options.search || '').trim().toLowerCase();
+    const cacheKey = `movies:${cat}:${page}:${limit}:${search}`;
 
-    const adultFilter = { $not: ADULT_REGEX };
-    const query: any = {
-      $or: [
-        { title: /\btoxic\b/i },
-        { title: adultFilter, full_title: adultFilter },
-      ],
-    };
+    return this.getOrSetCache(cacheKey, this.QUERY_CACHE_TTL_MS, async () => {
+      const skip = (page - 1) * limit;
 
-    if (options.search) {
-      const q = options.search.trim();
-      query.$and = [
-        {
-          $or: [
-            { title: { $regex: q, $options: 'i' } },
-            { full_title: { $regex: q, $options: 'i' } },
-          ],
-        },
-      ];
-    } else if (options.category && options.category.toLowerCase() !== 'all') {
-      const cat = options.category.toLowerCase().trim();
-      if (cat === 'indian') {
-        query.is_indian = true;
-      } else if (cat === 'global' || cat === 'non-indian' || cat === 'non_indian' || cat === 'international') {
-        query.is_indian = false;
-      } else {
+      const adultFilter = { $not: ADULT_REGEX };
+      const query: any = {
+        $or: [
+          { title: /\btoxic\b/i },
+          { title: adultFilter, full_title: adultFilter },
+        ],
+      };
+
+      if (options.search) {
+        const q = options.search.trim();
         query.$and = [
           {
             $or: [
-              { title: { $regex: cat, $options: 'i' } },
-              { full_title: { $regex: cat, $options: 'i' } },
+              { title: { $regex: q, $options: 'i' } },
+              { full_title: { $regex: q, $options: 'i' } },
             ],
           },
         ];
-      }
-    }
-
-    let livePrepended: MediaItem[] = [];
-    if (!options.search && page === 1) {
-      try {
-        const liveItems = await scraperPipelineService.getLatestLiveItems();
-        if (liveItems && liveItems.length > 0) {
-          const cat = options.category?.toLowerCase()?.trim();
-          if (cat === 'indian') {
-            livePrepended = liveItems.filter((i) => (i.type === 'movie' || !i.type) && i.isIndian);
-          } else if (cat === 'global' || cat === 'non-indian' || cat === 'non_indian' || cat === 'international') {
-            livePrepended = liveItems.filter((i) => (i.type === 'movie' || !i.type) && !i.isIndian);
-          } else {
-            livePrepended = liveItems.filter((i) => i.type === 'movie' || !i.type);
-          }
+      } else if (options.category && options.category.toLowerCase() !== 'all') {
+        const c = options.category.toLowerCase().trim();
+        if (c === 'indian') {
+          query.is_indian = true;
+        } else if (c === 'global' || c === 'non-indian' || c === 'non_indian' || c === 'international') {
+          query.is_indian = false;
+        } else {
+          query.$and = [
+            {
+              $or: [
+                { title: { $regex: c, $options: 'i' } },
+                { full_title: { $regex: c, $options: 'i' } },
+              ],
+            },
+          ];
         }
-      } catch (err: any) {
-        console.warn('Could not fetch live releases for movies:', err.message);
       }
-    }
 
-    // Strictly sort by latest website release order (newest updated/created first)
-    const findQuery = Movie.find(query)
-      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-      .select('id title full_title poster_url poster_filename year is_indian streams')
-      .skip(skip)
-      .limit(limit)
-      .lean();
-
-    if (livePrepended.length > 0) {
-      const liveTitles = new Set(livePrepended.map((i) => i.title.toLowerCase()));
-      const docs = await findQuery;
-      const older = docs.map(mapMovieToMediaItem).filter((i) => !liveTitles.has(i.title.toLowerCase()));
-      const combined = [...livePrepended, ...older].slice(0, limit);
-      return {
-        items: combined,
-        total: Math.max(11182, combined.length),
-        page,
-        totalPages: Math.ceil(11182 / limit),
-      };
-    }
-
-    // Cache overall total if searching or filtering is not active
-    const shouldCount = options.search || options.category;
-    let total = 11182;
-
-    if (shouldCount) {
-      const [docs, count] = await Promise.all([findQuery, Movie.countDocuments(query)]);
-      total = count;
-      return {
-        items: docs.map(mapMovieToMediaItem),
-        total,
-        page,
-        totalPages: Math.ceil(total / limit),
-      };
-    } else {
-      if (this.totalMoviesCache === null) {
-        this.totalMoviesCache = await Movie.countDocuments(query);
+      let livePrepended: MediaItem[] = [];
+      if (!options.search && page === 1) {
+        try {
+          const liveItems = await scraperPipelineService.getLatestLiveItems();
+          if (liveItems && liveItems.length > 0) {
+            const c = options.category?.toLowerCase()?.trim();
+            if (c === 'indian') {
+              livePrepended = liveItems.filter((i) => (i.type === 'movie' || !i.type) && i.isIndian);
+            } else if (c === 'global' || c === 'non-indian' || c === 'non_indian' || c === 'international') {
+              livePrepended = liveItems.filter((i) => (i.type === 'movie' || !i.type) && !i.isIndian);
+            } else {
+              livePrepended = liveItems.filter((i) => i.type === 'movie' || !i.type);
+            }
+          }
+        } catch (err: any) {
+          console.warn('Could not fetch live releases for movies:', err.message);
+        }
       }
-      total = this.totalMoviesCache;
-      const docs = await findQuery;
-      return {
-        items: docs.map(mapMovieToMediaItem),
-        total,
-        page,
-        totalPages: Math.ceil(total / limit),
-      };
-    }
+
+      // Strictly sort by latest website release order (newest updated/created first)
+      const findQuery = Movie.find(query)
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .select('id title full_title poster_url poster_filename year is_indian streams')
+        .skip(skip)
+        .limit(limit)
+        .lean();
+
+      if (livePrepended.length > 0) {
+        const liveTitles = new Set(livePrepended.map((i) => i.title.toLowerCase()));
+        const docs = await findQuery;
+        const older = docs.map(mapMovieToMediaItem).filter((i) => !liveTitles.has(i.title.toLowerCase()));
+        const combined = [...livePrepended, ...older].slice(0, limit);
+        return {
+          items: combined,
+          total: Math.max(11182, combined.length),
+          page,
+          totalPages: Math.ceil(11182 / limit),
+        };
+      }
+
+      // Cache overall total if searching or filtering is not active
+      const shouldCount = options.search || options.category;
+      let total = 11182;
+
+      if (shouldCount) {
+        const [docs, count] = await Promise.all([findQuery, Movie.countDocuments(query)]);
+        total = count;
+        return {
+          items: docs.map(mapMovieToMediaItem),
+          total,
+          page,
+          totalPages: Math.ceil(total / limit),
+        };
+      } else {
+        if (this.totalMoviesCache === null) {
+          this.totalMoviesCache = await Movie.countDocuments(query);
+        }
+        total = this.totalMoviesCache;
+        const docs = await findQuery;
+        return {
+          items: docs.map(mapMovieToMediaItem),
+          total,
+          page,
+          totalPages: Math.ceil(total / limit),
+        };
+      }
+    });
   }
 
   async getSeries(options: {
@@ -282,104 +322,115 @@ export class ContentService {
   }): Promise<{ items: MediaItem[]; total: number; page: number; totalPages: number }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
-    const skip = (page - 1) * limit;
+    const search = (options.search || '').trim().toLowerCase();
+    const cacheKey = `series:${page}:${limit}:${search}`;
 
-    const adultFilter = { $not: ADULT_REGEX };
-    const query: any = {
-      $or: [
-        { title: /\btoxic\b/i },
-        { title: adultFilter, full_title: adultFilter },
-      ],
-    };
+    return this.getOrSetCache(cacheKey, this.QUERY_CACHE_TTL_MS, async () => {
+      const skip = (page - 1) * limit;
 
-    if (options.search) {
-      const q = options.search.trim();
-      query.$and = [
-        {
-          $or: [
-            { title: { $regex: q, $options: 'i' } },
-            { full_title: { $regex: q, $options: 'i' } },
-          ],
-        },
-      ];
-    }
+      const adultFilter = { $not: ADULT_REGEX };
+      const query: any = {
+        $or: [
+          { title: /\btoxic\b/i },
+          { title: adultFilter, full_title: adultFilter },
+        ],
+      };
 
-    let livePrepended: MediaItem[] = [];
-    if (!options.search && page === 1) {
-      try {
-        const liveItems = await scraperPipelineService.getLatestLiveItems();
-        if (liveItems && liveItems.length > 0) {
-          livePrepended = liveItems.filter((i) => i.type === 'tv' || (i as any).type === 'series');
+      if (options.search) {
+        const q = options.search.trim();
+        query.$and = [
+          {
+            $or: [
+              { title: { $regex: q, $options: 'i' } },
+              { full_title: { $regex: q, $options: 'i' } },
+            ],
+          },
+        ];
+      }
+
+      let livePrepended: MediaItem[] = [];
+      if (!options.search && page === 1) {
+        try {
+          const liveItems = await scraperPipelineService.getLatestLiveItems();
+          if (liveItems && liveItems.length > 0) {
+            livePrepended = liveItems.filter((i) => i.type === 'tv' || (i as any).type === 'series');
+          }
+        } catch (err: any) {
+          console.warn('Could not fetch live releases for series:', err.message);
         }
-      } catch (err: any) {
-        console.warn('Could not fetch live releases for series:', err.message);
       }
-    }
 
-    // Sort strictly by latest website release order (newest updated/created first)
-    const findQuery = Series.find(query)
-      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-      .select('id title full_title poster_url poster_filename seasons')
-      .skip(skip)
-      .limit(limit)
-      .lean();
+      // Sort strictly by latest website release order (newest updated/created first)
+      const findQuery = Series.find(query)
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .select('id title full_title poster_url poster_filename seasons')
+        .skip(skip)
+        .limit(limit)
+        .lean();
 
-    if (livePrepended.length > 0) {
-      const liveTitles = new Set(livePrepended.map((i) => i.title.toLowerCase()));
-      const docs = await findQuery;
-      const older = docs.map(mapSeriesToMediaItem).filter((i) => !liveTitles.has(i.title.toLowerCase()));
-      const combined = [...livePrepended, ...older].slice(0, limit);
-      return {
-        items: combined,
-        total: Math.max(1282, combined.length),
-        page,
-        totalPages: Math.ceil(1282 / limit),
-      };
-    }
-
-    let total = 1282;
-    if (options.search) {
-      const [docs, count] = await Promise.all([findQuery, Series.countDocuments(query)]);
-      total = count;
-      return {
-        items: docs.map(mapSeriesToMediaItem),
-        total,
-        page,
-        totalPages: Math.ceil(total / limit),
-      };
-    } else {
-      if (this.totalSeriesCache === null) {
-        this.totalSeriesCache = await Series.countDocuments(query);
+      if (livePrepended.length > 0) {
+        const liveTitles = new Set(livePrepended.map((i) => i.title.toLowerCase()));
+        const docs = await findQuery;
+        const older = docs.map(mapSeriesToMediaItem).filter((i) => !liveTitles.has(i.title.toLowerCase()));
+        const combined = [...livePrepended, ...older].slice(0, limit);
+        return {
+          items: combined,
+          total: Math.max(1282, combined.length),
+          page,
+          totalPages: Math.ceil(1282 / limit),
+        };
       }
-      total = this.totalSeriesCache;
-      const docs = await findQuery;
-      return {
-        items: docs.map(mapSeriesToMediaItem),
-        total,
-        page,
-        totalPages: Math.ceil(total / limit),
-      };
-    }
+
+      let total = 1282;
+      if (options.search) {
+        const [docs, count] = await Promise.all([findQuery, Series.countDocuments(query)]);
+        total = count;
+        return {
+          items: docs.map(mapSeriesToMediaItem),
+          total,
+          page,
+          totalPages: Math.ceil(total / limit),
+        };
+      } else {
+        if (this.totalSeriesCache === null) {
+          this.totalSeriesCache = await Series.countDocuments(query);
+        }
+        total = this.totalSeriesCache;
+        const docs = await findQuery;
+        return {
+          items: docs.map(mapSeriesToMediaItem),
+          total,
+          page,
+          totalPages: Math.ceil(total / limit),
+        };
+      }
+    });
   }
 
   async getMovieById(id: string): Promise<any | null> {
-    const movie = await Movie.findOne({ id }).lean();
-    if (movie) {
-      const text = `${movie.title || ''} ${movie.full_title || ''} ${movie.movie_page_url || ''}`;
-      if (/\btoxic\b/i.test(text)) return movie; // Exception: Keep Toxic in App
-      if (ADULT_REGEX.test(text)) return null;
-    }
-    return movie;
+    const cacheKey = `movie_id:${id}`;
+    return this.getOrSetCache(cacheKey, 10 * 60 * 1000, async () => {
+      const movie = await Movie.findOne({ id }).lean();
+      if (movie) {
+        const text = `${movie.title || ''} ${movie.full_title || ''} ${movie.movie_page_url || ''}`;
+        if (/\btoxic\b/i.test(text)) return movie; // Exception: Keep Toxic in App
+        if (ADULT_REGEX.test(text)) return null;
+      }
+      return movie;
+    });
   }
 
   async getSeriesById(id: string): Promise<any | null> {
-    const series = await Series.findOne({ id }).lean();
-    if (series) {
-      const text = `${series.title || ''} ${series.full_title || ''} ${series.movie_page_url || ''}`;
-      if (/\btoxic\b/i.test(text)) return series; // Exception: Keep Toxic in App
-      if (ADULT_REGEX.test(text)) return null;
-    }
-    return series;
+    const cacheKey = `series_id:${id}`;
+    return this.getOrSetCache(cacheKey, 10 * 60 * 1000, async () => {
+      const series = await Series.findOne({ id }).lean();
+      if (series) {
+        const text = `${series.title || ''} ${series.full_title || ''} ${series.movie_page_url || ''}`;
+        if (/\btoxic\b/i.test(text)) return series; // Exception: Keep Toxic in App
+        if (ADULT_REGEX.test(text)) return null;
+      }
+      return series;
+    });
   }
 
   /**
@@ -392,97 +443,102 @@ export class ContentService {
   }): Promise<{ items: MediaItem[]; total: number; page: number; totalPages: number }> {
     const page = Math.max(1, Number(options.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(options.limit) || 40));
-    const skip = (page - 1) * limit;
+    const search = (options.search || '').trim().toLowerCase();
+    const cacheKey = `latest:${page}:${limit}:${search}`;
 
-    const adultFilter = { $not: ADULT_REGEX };
-    const query: any = {
-      $or: [
-        { title: /\btoxic\b/i },
-        { title: adultFilter, full_title: adultFilter },
-      ],
-    };
+    return this.getOrSetCache(cacheKey, this.QUERY_CACHE_TTL_MS, async () => {
+      const skip = (page - 1) * limit;
 
-    if (options.search) {
-      const q = options.search.trim();
-      query.$and = [
-        {
-          $or: [
-            { title: { $regex: q, $options: 'i' } },
-            { full_title: { $regex: q, $options: 'i' } },
-          ],
-        },
-      ];
-    }
+      const adultFilter = { $not: ADULT_REGEX };
+      const query: any = {
+        $or: [
+          { title: /\btoxic\b/i },
+          { title: adultFilter, full_title: adultFilter },
+        ],
+      };
 
-    if (!options.search) {
-      try {
-        const liveItems = await scraperPipelineService.getLatestLiveItems();
-        if (liveItems && liveItems.length > 0) {
-          if (skip < liveItems.length) {
-            const slice = liveItems.slice(skip, skip + limit);
-            if (slice.length < limit) {
-              const needed = limit - slice.length;
-              const liveTitles = new Set(liveItems.map((i) => i.title.toLowerCase()));
-              const olderMovies = await Movie.find(query)
-                .sort({ year: -1, updatedAt: -1, _id: -1 })
-                .select('id title full_title poster_url poster_filename year is_indian streams')
-                .limit(needed + 30)
-                .lean();
-              const olderSeries = await Series.find(query)
-                .sort({ updatedAt: -1, _id: -1 })
-                .select('id title full_title poster_url poster_filename seasons')
-                .limit(needed + 30)
-                .lean();
-              const olderCombined = [
-                ...olderMovies.map(mapMovieToMediaItem),
-                ...olderSeries.map(mapSeriesToMediaItem),
-              ].filter((i) => !liveTitles.has(i.title.toLowerCase()));
-              slice.push(...olderCombined.slice(0, needed));
-            }
-            return {
-              items: slice,
-              total: Math.max(12469, liveItems.length),
-              page,
-              totalPages: Math.ceil(12469 / limit),
-            };
-          }
-        }
-      } catch (err: any) {
-        console.warn('Could not fetch live scraped latest feed:', err.message);
+      if (options.search) {
+        const q = options.search.trim();
+        query.$and = [
+          {
+            $or: [
+              { title: { $regex: q, $options: 'i' } },
+              { full_title: { $regex: q, $options: 'i' } },
+            ],
+          },
+        ];
       }
-    }
 
-    const halfLimit = Math.ceil(limit / 2);
-    const halfSkip = Math.floor(skip / 2);
+      if (!options.search) {
+        try {
+          const liveItems = await scraperPipelineService.getLatestLiveItems();
+          if (liveItems && liveItems.length > 0) {
+            if (skip < liveItems.length) {
+              const slice = liveItems.slice(skip, skip + limit);
+              if (slice.length < limit) {
+                const needed = limit - slice.length;
+                const liveTitles = new Set(liveItems.map((i) => i.title.toLowerCase()));
+                const olderMovies = await Movie.find(query)
+                  .sort({ year: -1, updatedAt: -1, _id: -1 })
+                  .select('id title full_title poster_url poster_filename year is_indian streams')
+                  .limit(needed + 30)
+                  .lean();
+                const olderSeries = await Series.find(query)
+                  .sort({ updatedAt: -1, _id: -1 })
+                  .select('id title full_title poster_url poster_filename seasons')
+                  .limit(needed + 30)
+                  .lean();
+                const olderCombined = [
+                  ...olderMovies.map(mapMovieToMediaItem),
+                  ...olderSeries.map(mapSeriesToMediaItem),
+                ].filter((i) => !liveTitles.has(i.title.toLowerCase()));
+                slice.push(...olderCombined.slice(0, needed));
+              }
+              return {
+                items: slice,
+                total: Math.max(12469, liveItems.length),
+                page,
+                totalPages: Math.ceil(12469 / limit),
+              };
+            }
+          }
+        } catch (err: any) {
+          console.warn('Could not fetch live scraped latest feed:', err.message);
+        }
+      }
 
-    const [movies, series] = await Promise.all([
-      Movie.find(query)
-        .sort({ year: -1, updatedAt: -1, _id: -1 })
-        .select('id title full_title poster_url poster_filename year is_indian streams updatedAt')
-        .skip(halfSkip)
-        .limit(halfLimit + 10)
-        .lean(),
-      Series.find(query)
-        .sort({ updatedAt: -1, _id: -1 })
-        .select('id title full_title poster_url poster_filename seasons updatedAt')
-        .skip(halfSkip)
-        .limit(halfLimit + 10)
-        .lean(),
-    ]);
+      const halfLimit = Math.ceil(limit / 2);
+      const halfSkip = Math.floor(skip / 2);
 
-    const mappedMovies = movies.map((doc: any) => ({ ...mapMovieToMediaItem(doc), updatedAt: doc.updatedAt }));
-    const mappedSeries = series.map((doc: any) => ({ ...mapSeriesToMediaItem(doc), updatedAt: doc.updatedAt }));
+      const [movies, series] = await Promise.all([
+        Movie.find(query)
+          .sort({ year: -1, updatedAt: -1, _id: -1 })
+          .select('id title full_title poster_url poster_filename year is_indian streams updatedAt')
+          .skip(halfSkip)
+          .limit(halfLimit + 10)
+          .lean(),
+        Series.find(query)
+          .sort({ updatedAt: -1, _id: -1 })
+          .select('id title full_title poster_url poster_filename seasons updatedAt')
+          .skip(halfSkip)
+          .limit(halfLimit + 10)
+          .lean(),
+      ]);
 
-    const combined = [...mappedMovies, ...mappedSeries]
-      .sort((a: any, b: any) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
-      .slice(0, limit);
+      const mappedMovies = movies.map((doc: any) => ({ ...mapMovieToMediaItem(doc), updatedAt: doc.updatedAt }));
+      const mappedSeries = series.map((doc: any) => ({ ...mapSeriesToMediaItem(doc), updatedAt: doc.updatedAt }));
 
-    return {
-      items: combined,
-      total: 12469,
-      page,
-      totalPages: Math.ceil(12469 / limit),
-    };
+      const combined = [...mappedMovies, ...mappedSeries]
+        .sort((a: any, b: any) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+        .slice(0, limit);
+
+      return {
+        items: combined,
+        total: 12469,
+        page,
+        totalPages: Math.ceil(12469 / limit),
+      };
+    });
   }
 
   /**

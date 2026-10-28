@@ -116,6 +116,8 @@ const MovieSchema = new Schema<IMovie>(
 
 // Compound text and sorting indexes for sub-millisecond query execution
 MovieSchema.index({ title: 'text', full_title: 'text' });
+MovieSchema.index({ is_indian: 1, updatedAt: -1, createdAt: -1 });
+MovieSchema.index({ updatedAt: -1, createdAt: -1 });
 MovieSchema.index({ is_indian: 1, year: -1, updatedAt: -1 });
 MovieSchema.index({ year: -1, updatedAt: -1, createdAt: -1 });
 
@@ -133,8 +135,9 @@ const SeriesSchema = new Schema<ISeries>(
   { timestamps: true },
 );
 
-// Compound text index for series search
+// Compound text and sorting indexes for series
 SeriesSchema.index({ title: 'text', full_title: 'text' });
+SeriesSchema.index({ updatedAt: -1, createdAt: -1 });
 
 export const Movie: Model<IMovie> =
   mongoose.models.Movie || mongoose.model<IMovie>('Movie', MovieSchema);

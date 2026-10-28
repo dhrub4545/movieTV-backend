@@ -3,9 +3,17 @@ import { contentService } from '../services/contentService';
 
 export const feedRouter = Router();
  
-// Ensure responses are never cached by proxies/clients so new scraped releases appear immediately
-feedRouter.use((_req, res, next) => {
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+// Optimized HTTP Caching headers: enables client (OkHttp) and CDN caching with stale-while-revalidate for sub-second responses and minimum server load
+feedRouter.use((req, res, next) => {
+  if (req.method === 'GET') {
+    if (req.path.startsWith('/movie/') || req.path.startsWith('/series/')) {
+      res.set('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800');
+    } else if (req.query.search) {
+      res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    } else {
+      res.set('Cache-Control', 'public, max-age=180, stale-while-revalidate=300');
+    }
+  }
   next();
 });
 
