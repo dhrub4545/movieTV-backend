@@ -5,6 +5,9 @@ import { Movie, ScraperMeta, Series } from '../db';
 import { MediaItem } from '../types';
 import { ContentService, mapMovieToMediaItem, mapSeriesToMediaItem } from './contentService';
 import { extractDirectM3u8 } from './m3u8Extractor';
+import { resolveGreenmotors, rot13 } from './greenmotorsResolver';
+
+export { resolveGreenmotors, rot13 };
 
 const HEADERS = {
   'User-Agent':
@@ -16,46 +19,6 @@ const HEADERS = {
 };
 
 const DEFAULT_BASE_URL = 'https://new8.hdhub4u.cl';
-
-function rot13(str: string): string {
-  return str.replace(/[a-zA-Z]/g, (c) => {
-    const code = c.charCodeAt(0);
-    if (code >= 65 && code <= 90) return String.fromCharCode(((code - 65 + 13) % 26) + 65);
-    if (code >= 97 && code <= 122) return String.fromCharCode(((code - 97 + 13) % 26) + 97);
-    return c;
-  });
-}
-
-async function resolveGreenmotors(url: string): Promise<{ embedUrl: string; directUrl: string }> {
-  if (!url || !url.includes('greenmotors')) {
-    return { embedUrl: url || '', directUrl: '' };
-  }
-
-  try {
-    const res = await axios.get(url, { headers: HEADERS, timeout: 12000 });
-    const match = res.data.match(/s\('o',\s*'([^']+)'/);
-    if (!match) return { embedUrl: url, directUrl: '' };
-
-    const b64 = match[1];
-    const d1 = Buffer.from(b64, 'base64').toString('utf8');
-    const d2 = Buffer.from(d1, 'base64').toString('utf8');
-    const d3 = rot13(d2);
-    const d4 = Buffer.from(d3, 'base64').toString('utf8');
-    const data = JSON.parse(d4);
-    const playerEmbedUrl = Buffer.from(data.o, 'base64').toString('utf8');
-
-    const pRes = await axios.get(playerEmbedUrl, {
-      headers: { ...HEADERS, Referer: 'https://greenmotors.cc/homelander/' },
-      timeout: 12000,
-    });
-    const sMatch = pRes.data.match(/const\s+streamSrc\s*=\s*"([^"]+)"/);
-    const directStreamUrl = sMatch ? sMatch[1] : '';
-
-    return { embedUrl: playerEmbedUrl || url, directUrl: directStreamUrl };
-  } catch {
-    return { embedUrl: url, directUrl: '' };
-  }
-}
 
 function toEmbedLink(url: string): string {
   if (!url) return '';
@@ -733,7 +696,7 @@ export class ScraperPipelineService {
     }
   }
 
-  private async fetchDetailPage(url: string): Promise<string | null> {
+  public async fetchDetailPage(url: string): Promise<string | null> {
     try {
       const resp = await axios.get(url, { headers: HEADERS, timeout: 12000 });
       return resp.data;
@@ -808,7 +771,7 @@ export class ScraperPipelineService {
     return updatedCount;
   }
 
-  private async parseMovieOrSeries(
+  public async parseMovieOrSeries(
     html: string,
     title: string,
   ): Promise<{
@@ -865,10 +828,12 @@ export class ScraperPipelineService {
         if (!seasonsMap[currentSeason].some((e) => e.episode === currentEpLabel)) {
           let w1Emb = '';
           let w1Raw = '';
+          let gmEpDirect1 = '';
 
           if (currentEpWatch1.includes('greenmotors')) {
             const gm = await resolveGreenmotors(currentEpWatch1);
             w1Emb = gm.embedUrl;
+            gmEpDirect1 = gm.directUrl;
             w1Raw = gm.directUrl || gm.embedUrl;
           } else {
             w1Emb = toEmbedLink(currentEpWatch1);
@@ -876,10 +841,12 @@ export class ScraperPipelineService {
           }
 
           let w2Emb = '';
+          let gmEpDirect2 = '';
           if (currentEpWatch2) {
             if (currentEpWatch2.includes('greenmotors')) {
               const gm2 = await resolveGreenmotors(currentEpWatch2);
               w2Emb = gm2.embedUrl;
+              gmEpDirect2 = gm2.directUrl;
             } else {
               w2Emb = toEmbedLink(currentEpWatch2);
             }
@@ -891,6 +858,9 @@ export class ScraperPipelineService {
               m3u8Url = (await extractDirectM3u8(w1Emb)) || '';
             } catch {}
           }
+          if (!m3u8Url && gmEpDirect1) {
+            m3u8Url = gmEpDirect1;
+          }
 
           let p2M3u8 = '';
           const finalW2 = w2Emb || toEmbedLink(currentEpWatch2);
@@ -898,6 +868,9 @@ export class ScraperPipelineService {
             try {
               p2M3u8 = (await extractDirectM3u8(finalW2)) || '';
             } catch {}
+          }
+          if (!p2M3u8 && gmEpDirect2) {
+            p2M3u8 = gmEpDirect2;
           }
 
           seasonsMap[currentSeason].push({
@@ -1023,47 +996,91 @@ export class ScraperPipelineService {
     let watchUrl = '';
     let player2Url = '';
 
-    const pairMatch = postBody.match(
-      /<a\s+[^>]*href=["']([^"']+)["'][^>]*>(?:<span[^>]*>)?WATCH(?:<\/span>)?<\/a>\s*(?:[|•\s]+)\s*<a\s+[^>]*href=["']([^"']+)["'][^>]*>(?:<span[^>]*>)?PLAYER-?2(?:<\/span>)?<\/a>/i,
-    );
+    const allAnchors = Array.from(postBody.matchAll(/<a\s+([^>]*?)>([\s\S]*?)<\/a>/gi));
 
-    if (pairMatch) {
-      watchUrl = pairMatch[1].trim();
-      player2Url = pairMatch[2].trim();
-    } else {
-      const wMatch = postBody.match(
-        /<a\s+[^>]*href=["']([^"']+)["'][^>]*>(?:<span[^>]*>)?WATCH(?:\s*Online)?(?:<\/span>)?<\/a>/i,
-      );
-      if (wMatch) watchUrl = wMatch[1].trim();
+    for (const m of allAnchors) {
+      const attrs = m[1];
+      const inner = m[2];
+      const hrefM = attrs.match(/href=["']([^"']+)["']/i);
+      if (!hrefM) continue;
+      const href = hrefM[1].trim();
+      if (
+        href.startsWith('#') ||
+        href.startsWith('javascript:') ||
+        href.includes('t.me') ||
+        href.includes('telegram')
+      ) {
+        continue;
+      }
 
-      const p2Match = postBody.match(
-        /<a\s+[^>]*href=["']([^"']+)["'][^>]*>(?:<span[^>]*>)?PLAYER-?2(?:<\/span>)?<\/a>/i,
-      );
-      if (p2Match) player2Url = p2Match[1].trim();
+      const text = inner.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+
+      // Ignore general download links (e.g. "DOWNLOAD 1080P", "480P", "720P", "G-DIRECT", "FAST CLOUD")
+      if (
+        /DOWNLOAD|\b\d{3,4}P\b|ZIP|G-DIRECT|GDRIVE|TORRENT|HEVC/i.test(text) &&
+        !text.includes('WATCH') &&
+        !text.includes('PLAYER')
+      ) {
+        continue;
+      }
+
+      // Match combined WATCH | PLAYER-2 links (frequent on HDHub4u)
+      if (
+        text.includes('WATCH') &&
+        (text.includes('PLAYER-2') || text.includes('PLAYER 2') || text.includes('PLAYER2') || text.includes('PLAYER - 2'))
+      ) {
+        if (!watchUrl) watchUrl = href;
+        if (!player2Url) player2Url = href;
+      } else if (
+        text.includes('PLAYER-2') ||
+        text.includes('PLAYER 2') ||
+        text.includes('SERVER-2') ||
+        text.includes('SERVER 2') ||
+        text === '2'
+      ) {
+        if (!player2Url) player2Url = href;
+      } else if (
+        text.includes('WATCH') ||
+        text.includes('PLAYER 1') ||
+        text.includes('PLAYER-1') ||
+        text.includes('SERVER 1') ||
+        text.includes('SERVER-1')
+      ) {
+        if (!watchUrl) watchUrl = href;
+      }
     }
 
-    if (!watchUrl) {
-      const allLinks = Array.from(
-        postBody.matchAll(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>/gi),
-      ).map((m) => m[1]);
-      for (const h of allLinks) {
-        if (
-          ['hdstream4u.com', 'hubstream.art', 'vidaraa.cc', 'greenmotors.club'].some((d) =>
-            h.includes(d),
-          )
-        ) {
-          watchUrl = h;
-          break;
+    // Fallback: If watchUrl or player2Url is still missing, check known stream hostnames
+    if (!watchUrl || !player2Url) {
+      const knownStreamHosts = [
+        'hdstream4u.com',
+        'hubstream.art',
+        'vidaraa.cc',
+        'greenmotors.club',
+        'multicloudlinks.com',
+      ];
+      for (const m of allAnchors) {
+        const hrefM = m[1].match(/href=["']([^"']+)["']/i);
+        if (!hrefM) continue;
+        const href = hrefM[1].trim();
+        if (knownStreamHosts.some((h) => href.includes(h))) {
+          if (!watchUrl) {
+            watchUrl = href;
+          } else if (!player2Url && player2Url !== href) {
+            player2Url = href;
+          }
         }
       }
     }
 
     let wEmb = '';
     let wRaw = '';
+    let gmDirect1 = '';
 
     if (watchUrl && watchUrl.includes('greenmotors')) {
       const gm = await resolveGreenmotors(watchUrl);
       wEmb = gm.embedUrl;
+      gmDirect1 = gm.directUrl;
       wRaw = gm.directUrl || gm.embedUrl;
     } else {
       wEmb = toEmbedLink(watchUrl);
@@ -1071,10 +1088,12 @@ export class ScraperPipelineService {
     }
 
     let p2Emb = '';
+    let gmDirect2 = '';
     if (player2Url) {
       if (player2Url.includes('greenmotors')) {
         const gm2 = await resolveGreenmotors(player2Url);
         p2Emb = gm2.embedUrl;
+        gmDirect2 = gm2.directUrl;
       } else {
         p2Emb = toEmbedLink(player2Url);
       }
@@ -1086,6 +1105,9 @@ export class ScraperPipelineService {
         m3u8Url = (await extractDirectM3u8(wEmb)) || '';
       } catch {}
     }
+    if (!m3u8Url && gmDirect1) {
+      m3u8Url = gmDirect1;
+    }
 
     let p2M3u8 = '';
     const finalP2 = p2Emb || toEmbedLink(player2Url);
@@ -1093,6 +1115,9 @@ export class ScraperPipelineService {
       try {
         p2M3u8 = (await extractDirectM3u8(finalP2)) || '';
       } catch {}
+    }
+    if (!p2M3u8 && gmDirect2) {
+      p2M3u8 = gmDirect2;
     }
 
     return {

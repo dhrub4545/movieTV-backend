@@ -1,6 +1,7 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import https from 'https';
+import { resolveGreenmotors } from './greenmotorsResolver';
 
 // High-throughput insecure HTTPS agent for personal use (ignores SSL expiration, reuses sockets)
 const insecureAgent = new https.Agent({
@@ -144,18 +145,41 @@ export async function extractHubstreamM3u8(url: string): Promise<string | null> 
 }
 
 /**
- * Extracts the direct .m3u8 streaming link from an embed URL (e.g. hdstream4u, greenmotors, hubstream, etc.)
+ * Extracts the direct .m3u8 or progressive video streaming link from an embed URL (e.g. hdstream4u, greenmotors, hubstream, multicloudlinks, etc.)
  */
 export async function extractDirectM3u8(url: string): Promise<string | null> {
   if (!url || typeof url !== 'string') return null;
   let targetUrl = url.trim();
 
-  if (targetUrl.includes('.m3u8')) return targetUrl;
+  // If already a direct media stream or progressive file URL, return immediately
+  if (
+    targetUrl.includes('.m3u8') ||
+    targetUrl.includes('action=watch') ||
+    targetUrl.includes('multidownload.lol') ||
+    targetUrl.endsWith('.mp4') ||
+    targetUrl.endsWith('.mkv')
+  ) {
+    return targetUrl;
+  }
 
   // Check in-memory extraction cache
   const cached = extractionCache.get(targetUrl);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.m3u8;
+  }
+
+  // If greenmotors is passed, resolve its obfuscated token directly
+  if (targetUrl.includes('greenmotors')) {
+    try {
+      const gm = await resolveGreenmotors(targetUrl);
+      if (gm.directUrl) {
+        extractionCache.set(targetUrl, { m3u8: gm.directUrl, expiresAt: Date.now() + 15 * 60 * 1000 });
+        return gm.directUrl;
+      }
+      if (gm.embedUrl && gm.embedUrl !== targetUrl) {
+        targetUrl = gm.embedUrl;
+      }
+    } catch {}
   }
 
   if (targetUrl.includes('/file/')) targetUrl = targetUrl.replace('/file/', '/embed/');
@@ -169,7 +193,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
     }
   }
 
-  // 2. HTTP page fetching & Dean Edwards / Regex extraction
+  // 2. HTTP page fetching & Dean Edwards / streamSrc / Regex extraction
   try {
     const origin = new URL(targetUrl).origin;
     const resp = await axios.get(targetUrl, {
@@ -178,7 +202,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         Referer: origin + '/',
       },
-      timeout: 8000,
+      timeout: 10000,
       httpsAgent: insecureAgent,
     });
     const html = typeof resp.data === 'string' ? resp.data : '';
@@ -186,11 +210,21 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
 
     let foundM3u8: string | null = null;
 
-    // A. Direct match in html
-    const directMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-    if (directMatch) foundM3u8 = directMatch[0];
+    // A. streamSrc match (e.g. multicloudlinks, multidownload)
+    const streamSrcMatch =
+      html.match(/(?:const|var|let)\s+streamSrc\s*=\s*["']([^"']+)["']/i) ||
+      html.match(/["'](https?:\/\/[^"']+(?:action=watch|multidownload)[^"']*)["']/i);
+    if (streamSrcMatch) {
+      foundM3u8 = streamSrcMatch[1];
+    }
 
-    // B. Dean Edwards packed script
+    // B. Direct match in html
+    if (!foundM3u8) {
+      const directMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+      if (directMatch) foundM3u8 = directMatch[0];
+    }
+
+    // C. Dean Edwards packed script
     if (!foundM3u8) {
       const unpacked = unpackDeanEdwards(html);
       if (unpacked) {
