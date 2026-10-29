@@ -504,7 +504,6 @@ export class ScraperPipelineService {
                   if (newPlayer2) inMovie.streams.player_2 = newPlayer2;
                   if (newRaw) inMovie.streams.watch_raw = newRaw;
                   if (newM3u8) inMovie.streams.m3u8_url = newM3u8;
-                  if (newPlayer2M3u8) inMovie.streams.player_2_m3u8_url = newPlayer2M3u8;
 
                   inMovie.markModified('streams');
                   updatedStream = isChanged;
@@ -756,10 +755,6 @@ export class ScraperPipelineService {
             existingEp.m3u8_url = newM3u8;
             epChanged = true;
           }
-          if (newP2M3u8 && newP2M3u8 !== existingEp.player_2_m3u8_url) {
-            existingEp.player_2_m3u8_url = newP2M3u8;
-            epChanged = true;
-          }
 
           if (epChanged) {
             updatedCount++;
@@ -879,7 +874,6 @@ export class ScraperPipelineService {
             watch_1_raw: w1Raw,
             watch_2: finalW2,
             m3u8_url: m3u8Url,
-            player_2_m3u8_url: p2M3u8,
           });
         }
       }
@@ -1127,7 +1121,6 @@ export class ScraperPipelineService {
         watch_raw: wRaw,
         player_2: finalP2,
         m3u8_url: m3u8Url,
-        player_2_m3u8_url: p2M3u8,
       },
     };
   }

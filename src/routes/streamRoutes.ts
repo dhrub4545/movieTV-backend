@@ -36,6 +36,11 @@ streamRouter.post('/save-m3u8', async (req, res) => {
       return res.status(400).json({ error: 'm3u8Url is required' });
     }
 
+    // Only save Player 1 (permanent .m3u8 from watch_embed); Player 2 is dynamic live and never persisted
+    if (player === 2) {
+      return res.json({ success: true, message: 'Player 2 uses live on-the-fly M3U8 (not saved to DB)' });
+    }
+
     const success = await streamResolverService.saveDirectM3u8({
       id,
       title,
@@ -43,10 +48,10 @@ streamRouter.post('/save-m3u8', async (req, res) => {
       season: season ? Number(season) : undefined,
       episode,
       m3u8Url,
-      player: player === 2 ? 2 : 1,
+      player: 1,
     });
 
-    res.json({ success, m3u8Url, player: player === 2 ? 2 : 1 });
+    res.json({ success, m3u8Url, player: 1 });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to save m3u8', message: err.message });
   }

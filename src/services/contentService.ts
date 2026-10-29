@@ -103,7 +103,7 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     quality,
     streamUrl: doc.streams?.m3u8_url || undefined,
     m3u8_url: doc.streams?.m3u8_url || undefined,
-    player_2_m3u8_url: doc.streams?.player_2_m3u8_url || undefined,
+    player_2_m3u8_url: undefined,
   };
 }
 
