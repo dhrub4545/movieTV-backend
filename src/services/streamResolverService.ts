@@ -11,16 +11,43 @@ export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
 /**
  * Checks if a stream URL is reachable and does not return HTTP 403 Forbidden.
  */
-export async function isStreamUrlAlive(url: string, timeoutMs: number = 2000): Promise<boolean> {
+export function getHeadersForStreamUrl(url: string): Record<string, string> {
+  if (!url) return {};
+  if (url.includes('hubstream') || url.includes('skyline') || url.includes('greenstream') || url.includes('94.131.217')) {
+    return {
+      Referer: 'https://hubstream.art/',
+      Origin: 'https://hubstream.art',
+    };
+  }
+  if (url.includes('vidaraa') || url.includes('97bf1.com') || url.includes('s1q2105.com')) {
+    return {
+      Referer: 'https://vidaraa.cc/',
+      Origin: 'https://vidaraa.cc',
+    };
+  }
+  if (url.includes('multidownload') || url.includes('multicloudlinks')) {
+    return {
+      Referer: 'https://new.multicloudlinks.com/',
+      Origin: 'https://new.multicloudlinks.com',
+    };
+  }
+  return {
+    Referer: 'https://hdstream4u.com/',
+    Origin: 'https://hdstream4u.com',
+  };
+}
+
+export async function isStreamUrlAlive(url: string, timeoutMs: number = 3000): Promise<boolean> {
   if (!url || typeof url !== 'string') return false;
   if (!isM3u8TokenValid(url)) return false;
 
   if (url.includes('.m3u8')) {
     try {
+      const headers = getHeadersForStreamUrl(url);
       const resp = await axios.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Referer': url.includes('hubstream') ? 'https://hubstream.art/' : 'https://hdstream4u.com/',
+          ...headers,
         },
         timeout: timeoutMs,
         validateStatus: () => true,
@@ -39,6 +66,7 @@ export async function isStreamUrlAlive(url: string, timeoutMs: number = 2000): P
  * - HDStream4u acek-cdn / dramiyos-cdn: s=<start_time_sec> & e=<duration_sec> -> expires at (s + e)
  * - Hubstream: kx=<timestamp_sec>
  * - multidownload / multicloudlinks: exp=<timestamp_sec>
+ * - Vidaraa: token=...-<timestamp_sec>-...
  */
 export function isM3u8TokenValid(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
@@ -64,6 +92,13 @@ export function isM3u8TokenValid(url: string): boolean {
   const matchExp = url.match(/[?&]exp=(\d+)/);
   if (matchExp) {
     const exp = parseInt(matchExp[1], 10);
+    return exp > nowSec + 120;
+  }
+
+  // Vidaraa: token=...-<timestamp>-...
+  const matchVidaraa = url.match(/[?&]token=[a-f0-9]+-(\d+)-/i);
+  if (matchVidaraa) {
+    const exp = parseInt(matchVidaraa[1], 10);
     return exp > nowSec + 120;
   }
 
@@ -468,20 +503,11 @@ export class StreamResolverService {
     // Use the permanent direct .m3u8 saved in the DB
     if (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) && isM3u8TokenValid(streams.m3u8_url)) {
       const isHls = streams.m3u8_url.includes('.m3u8');
-      const isMulti = streams.m3u8_url.includes('multidownload') || streams.m3u8_url.includes('multicloudlinks');
       sources.push({
         quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Fast Stream)',
         url: streams.m3u8_url.trim(),
         format: isHls ? 'hls' : 'mp4',
-        headers: isMulti
-          ? {
-              Referer: 'https://new.multicloudlinks.com/',
-              Origin: 'https://new.multicloudlinks.com',
-            }
-          : {
-              Referer: 'https://hdstream4u.com/',
-              Origin: 'https://hdstream4u.com',
-            },
+        headers: getHeadersForStreamUrl(streams.m3u8_url),
       });
     } else if (streams && streams.watch_embed) {
       const normW1 = normalizeStreamUrl(streams.watch_embed);
@@ -491,9 +517,7 @@ export class StreamResolverService {
           quality: '🎬 Server 1: Primary Stream',
           url: normW1,
           format: normW1.includes('.m3u8') ? 'hls' : isDirect ? 'mp4' : 'embed',
-          headers: {
-            Referer: normW1.includes('multicloudlinks') ? 'https://new.multicloudlinks.com/' : `${scraperPipelineService.getBaseUrl()}/`,
-          },
+          headers: getHeadersForStreamUrl(normW1),
         });
       }
     }
@@ -502,20 +526,11 @@ export class StreamResolverService {
     // Use the fresh live .m3u8 extracted dynamically on-the-fly!
     if (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8)) {
       const isHls = livePlayer2M3u8.includes('.m3u8');
-      const isMulti = livePlayer2M3u8.includes('multidownload') || livePlayer2M3u8.includes('multicloudlinks');
       sources.push({
         quality: isHls ? '🍿 Server 2: Alternate Player (Live HLS)' : '🍿 Server 2: Alternate Player (Live Stream)',
         url: livePlayer2M3u8.trim(),
         format: isHls ? 'hls' : 'mp4',
-        headers: isMulti
-          ? {
-              Referer: 'https://new.multicloudlinks.com/',
-              Origin: 'https://new.multicloudlinks.com',
-            }
-          : {
-              Referer: 'https://hubstream.art/',
-              Origin: 'https://hubstream.art',
-            },
+        headers: getHeadersForStreamUrl(livePlayer2M3u8),
       });
     } else if (streams && streams.player_2) {
       const normP2 = normalizeStreamUrl(streams.player_2);
@@ -524,10 +539,21 @@ export class StreamResolverService {
           quality: '🍿 Server 2: Alternate Player',
           url: normP2,
           format: 'embed',
-          headers: {
-            Referer: 'https://hubstream.art/',
-            Origin: 'https://hubstream.art',
-          },
+          headers: getHeadersForStreamUrl(normP2),
+        });
+      }
+    }
+
+    // SERVER 3 (Player 3 - Web Stream from watch_embed):
+    // Plays the watch_embed stream link directly instead of the .m3u8 link
+    if (streams && streams.watch_embed) {
+      const normW1 = normalizeStreamUrl(streams.watch_embed);
+      if (isLinkValid(normW1)) {
+        sources.push({
+          quality: '🌐 Server 3: Web Stream (Watch Embed)',
+          url: normW1,
+          format: 'embed',
+          headers: getHeadersForStreamUrl(normW1),
         });
       }
     }
@@ -560,6 +586,7 @@ export class StreamResolverService {
       sources,
       m3u8_url: streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) ? streams.m3u8_url.trim() : undefined,
       player_2_m3u8_url: livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined,
+      watch_embed_url: streams && streams.watch_embed ? normalizeStreamUrl(streams.watch_embed) : undefined,
       subtitles,
     };
 

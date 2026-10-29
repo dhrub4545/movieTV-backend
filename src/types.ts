@@ -64,5 +64,6 @@ export interface StreamResolveResponse {
   sources: StreamSource[];
   m3u8_url?: string;
   player_2_m3u8_url?: string;
+  watch_embed_url?: string;
   subtitles: SubtitleTrack[];
 }

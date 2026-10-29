@@ -144,12 +144,55 @@ export async function extractHubstreamM3u8(url: string): Promise<string | null> 
   }
 }
 
+export async function extractVidaraaM3u8(url: string): Promise<string | null> {
+  try {
+    let filecode = '';
+    const match = url.match(/\/(?:e|v)\/([a-zA-Z0-9_-]+)/);
+    if (match) filecode = match[1];
+    if (!filecode) {
+      const parts = url.split('/');
+      filecode = parts[parts.length - 1].split('?')[0];
+    }
+    if (!filecode || filecode.length < 3) return null;
+
+    const res = await axios.post(
+      'https://vidaraa.cc/api/stream',
+      {
+        filecode,
+        device: 'desktop',
+        codecs: { h264: true, aac: true },
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          Referer: `https://vidaraa.cc/e/${filecode}`,
+          Origin: 'https://vidaraa.cc',
+        },
+        timeout: 12000,
+        httpsAgent: insecureAgent,
+      },
+    );
+    if (res.data?.streaming_url && typeof res.data.streaming_url === 'string' && res.data.streaming_url.includes('.m3u8')) {
+      return res.data.streaming_url;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Extracts the direct .m3u8 or progressive video streaming link from an embed URL (e.g. hdstream4u, greenmotors, hubstream, multicloudlinks, etc.)
+ * Extracts the direct .m3u8 or progressive video streaming link from an embed URL (e.g. hdstream4u, greenmotors, hubstream, multicloudlinks, vidaraa, etc.)
  */
 export async function extractDirectM3u8(url: string): Promise<string | null> {
   if (!url || typeof url !== 'string') return null;
   let targetUrl = url.trim();
+
+  // Normalize common mirror / typo domains
+  if (targetUrl.includes('hdstrram4u.com')) {
+    targetUrl = targetUrl.replace('hdstrram4u.com', 'hdstream4u.com');
+  }
 
   // If already a direct media stream or progressive file URL, return immediately
   if (
@@ -184,7 +227,16 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
 
   if (targetUrl.includes('/file/')) targetUrl = targetUrl.replace('/file/', '/embed/');
 
-  // 1. Hubstream AES video extraction
+  // 1. Vidaraa API extraction
+  if (targetUrl.includes('vidaraa.cc') || targetUrl.includes('vidaraa.')) {
+    const vd = await extractVidaraaM3u8(targetUrl);
+    if (vd) {
+      extractionCache.set(url.trim(), { m3u8: vd, expiresAt: Date.now() + 15 * 60 * 1000 });
+      return vd;
+    }
+  }
+
+  // 2. Hubstream AES video extraction
   if (targetUrl.includes('hubstream') || targetUrl.includes('/meb/') || targetUrl.includes('/unl/') || targetUrl.includes('#')) {
     const hs = await extractHubstreamM3u8(targetUrl);
     if (hs) {
@@ -193,7 +245,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
     }
   }
 
-  // 2. HTTP page fetching & Dean Edwards / streamSrc / Regex extraction
+  // 3. HTTP page fetching & Dean Edwards / streamSrc / Regex extraction
   try {
     const origin = new URL(targetUrl).origin;
     const resp = await axios.get(targetUrl, {
