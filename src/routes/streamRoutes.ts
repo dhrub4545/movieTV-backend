@@ -13,6 +13,7 @@ streamRouter.get('/resolve', async (req, res) => {
     const type = (req.query.type as 'movie' | 'tv') || 'movie';
     const season = req.query.season ? Number(req.query.season) : undefined;
     const episode = req.query.episode ? Number(req.query.episode) : undefined;
+    const forceRefresh = req.query.forceRefresh === 'true' || req.query.refresh === 'true';
 
     const streamData = await streamResolverService.resolveStream({
       id,
@@ -20,6 +21,7 @@ streamRouter.get('/resolve', async (req, res) => {
       type,
       season,
       episode,
+      forceRefresh,
     });
 
     res.json(streamData);

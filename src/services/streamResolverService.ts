@@ -1,3 +1,4 @@
+import axios from 'axios';
 import mongoose from 'mongoose';
 import { Movie, Series } from '../db';
 import { StreamResolveResponse, StreamSource, SubtitleTrack } from '../types';
@@ -8,6 +9,31 @@ import { resolveGreenmotors } from './greenmotorsResolver';
 export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
 
 /**
+ * Checks if a stream URL is reachable and does not return HTTP 403 Forbidden.
+ */
+export async function isStreamUrlAlive(url: string, timeoutMs: number = 2000): Promise<boolean> {
+  if (!url || typeof url !== 'string') return false;
+  if (!isM3u8TokenValid(url)) return false;
+
+  if (url.includes('.m3u8')) {
+    try {
+      const resp = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': url.includes('hubstream') ? 'https://hubstream.art/' : 'https://hdstream4u.com/',
+        },
+        timeout: timeoutMs,
+        validateStatus: () => true,
+      });
+      return resp.status === 200;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Checks if a direct .m3u8 or streaming URL has an expired token.
  * Accurately calculates expiration for:
  * - HDStream4u acek-cdn / dramiyos-cdn: s=<start_time_sec> & e=<duration_sec> -> expires at (s + e)
@@ -16,6 +42,7 @@ export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
  */
 export function isM3u8TokenValid(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
+  if (url.includes('&asn=&') || url.endsWith('&asn=')) return false;
   const nowSec = Math.floor(Date.now() / 1000);
 
   // HDStream4u acek-cdn / dramiyos-cdn: s=<start_sec>&e=<duration_sec>
@@ -63,6 +90,12 @@ export async function saveDirectM3u8(params: {
   // Player 2 uses dynamic live M3U8 on-the-fly and is never stored in DB
   if (player === 2) {
     return true;
+  }
+
+  // Reject URLs with empty asn= parameter or broken tokens
+  if (m3u8Url.includes('&asn=&') || m3u8Url.endsWith('&asn=')) {
+    console.warn(`[StreamResolver] Rejecting save for M3U8 with empty asn: ${m3u8Url}`);
+    return false;
   }
 
   try {
@@ -173,8 +206,9 @@ export class StreamResolverService {
     type?: 'movie' | 'tv';
     season?: number;
     episode?: number;
+    forceRefresh?: boolean;
   }): Promise<StreamResolveResponse> {
-    const { id, title, type = 'movie', season = 1, episode = 1 } = params;
+    const { id, title, type = 'movie', season = 1, episode = 1, forceRefresh = false } = params;
     const cacheKey = `${id || ''}-${title || ''}-${type}-${season}-${episode}`;
 
     const isDirectStream = (url: string) => {
@@ -188,15 +222,17 @@ export class StreamResolverService {
       );
     };
 
-    // Check in-memory cache: ensure both Server 1 and Server 2 tokens are currently valid
-    const cached = this.cache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      const p1Source = cached.data.sources.find((s) => s.quality.includes('Server 1'));
-      const p2Source = cached.data.sources.find((s) => s.quality.includes('Server 2'));
-      const p1Valid = !p1Source || !p1Source.url || !isDirectStream(p1Source.url) || isM3u8TokenValid(p1Source.url);
-      const p2Valid = !p2Source || !p2Source.url || !isDirectStream(p2Source.url) || isM3u8TokenValid(p2Source.url);
-      if (p1Valid && p2Valid) {
-        return cached.data;
+    // Check in-memory cache if not force refreshing
+    if (!forceRefresh) {
+      const cached = this.cache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        const p1Source = cached.data.sources.find((s) => s.quality.includes('Server 1'));
+        const p2Source = cached.data.sources.find((s) => s.quality.includes('Server 2'));
+        const p1Valid = !p1Source || !p1Source.url || !isDirectStream(p1Source.url) || isM3u8TokenValid(p1Source.url);
+        const p2Valid = !p2Source || !p2Source.url || !isDirectStream(p2Source.url) || isM3u8TokenValid(p2Source.url);
+        if (p1Valid && p2Valid) {
+          return cached.data;
+        }
       }
     }
 
@@ -284,11 +320,24 @@ export class StreamResolverService {
           }
 
           // SERVER 1: Permanent M3U8 from watch_embed
-          // If streams.m3u8_url is not in DB or has an expired token, extract it from watch_embed and save to DB!
-          const m3u8NeedsExtraction =
+          // Check if stream needs re-extraction:
+          // 1) forceRefresh requested
+          // 2) Not in DB or not direct
+          // 3) Token expired (s + e, kx, exp)
+          // 4) Probing stream returns HTTP 403 or failure
+          let m3u8NeedsExtraction =
+            forceRefresh ||
             !streams.m3u8_url ||
             !isDirectStream(streams.m3u8_url) ||
             !isM3u8TokenValid(streams.m3u8_url);
+
+          if (!m3u8NeedsExtraction && streams.m3u8_url) {
+            const alive = await isStreamUrlAlive(streams.m3u8_url, 1500);
+            if (!alive) {
+              console.log(`[StreamResolver] Stored M3U8 failed health check (HTTP 403/down). Invalidation triggered for: ${doc.title}`);
+              m3u8NeedsExtraction = true;
+            }
+          }
 
           if (m3u8NeedsExtraction && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
             try {
@@ -352,10 +401,19 @@ export class StreamResolverService {
             const sDocId = (sDoc as any).id || (sDoc as any)._id?.toString();
 
             // SERVER 1 for Series: Extract permanent M3U8 from watch_1_embed and save to DB
-            const epM3u8NeedsExtraction =
+            let epM3u8NeedsExtraction =
+              forceRefresh ||
               !streams.m3u8_url ||
               !isDirectStream(streams.m3u8_url) ||
               !isM3u8TokenValid(streams.m3u8_url);
+
+            if (!epM3u8NeedsExtraction && streams.m3u8_url) {
+              const alive = await isStreamUrlAlive(streams.m3u8_url, 1500);
+              if (!alive) {
+                console.log(`[StreamResolver] Episode M3U8 failed health check (HTTP 403). Invalidation triggered for: ${sDoc.title}`);
+                epM3u8NeedsExtraction = true;
+              }
+            }
 
             if (epM3u8NeedsExtraction && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
               try {
