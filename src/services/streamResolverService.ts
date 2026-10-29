@@ -273,6 +273,7 @@ export class StreamResolverService {
 
     let targetTitle = title || 'Stream';
     let streams: any = null;
+    let livePlayer1M3u8: string | null = null;
     let livePlayer2M3u8: string | null = null;
 
     // 1. Try finding in MongoDB (handle both ObjectId and string ID)
@@ -354,41 +355,22 @@ export class StreamResolverService {
             } catch {}
           }
 
-          // SERVER 1: Permanent M3U8 from watch_embed
-          // Check if stream needs re-extraction:
-          // 1) forceRefresh requested
-          // 2) Not in DB or not direct
-          // 3) Token expired (s + e, kx, exp)
-          // 4) Probing stream returns HTTP 403 or failure
-          let m3u8NeedsExtraction =
-            forceRefresh ||
-            !streams.m3u8_url ||
-            !isDirectStream(streams.m3u8_url) ||
-            !isM3u8TokenValid(streams.m3u8_url);
-
-          if (!m3u8NeedsExtraction && streams.m3u8_url) {
-            const alive = await isStreamUrlAlive(streams.m3u8_url, 1500);
-            if (!alive) {
-              console.log(`[StreamResolver] Stored M3U8 failed health check (HTTP 403/down). Invalidation triggered for: ${doc.title}`);
-              m3u8NeedsExtraction = true;
-            }
-          }
-
-          if (m3u8NeedsExtraction && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
+          // SERVER 1: Real-time .m3u8 extraction on-the-fly from watch_embed (NOT using stale DB m3u8_url)
+          if (streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
             try {
-              const directM3u8 = await extractDirectM3u8(streams.watch_embed);
-              if (directM3u8) {
-                streams.m3u8_url = directM3u8;
-                await saveDirectM3u8({
+              livePlayer1M3u8 = await extractDirectM3u8(streams.watch_embed);
+              if (livePlayer1M3u8) {
+                streams.m3u8_url = livePlayer1M3u8;
+                saveDirectM3u8({
                   id: docId,
                   title: doc.title,
                   type: 'movie',
                   player: 1,
-                  m3u8Url: directM3u8,
-                });
+                  m3u8Url: livePlayer1M3u8,
+                }).catch(() => {});
               }
             } catch (extErr: any) {
-              console.warn('On-the-fly Player 1 M3U8 extraction error:', extErr.message);
+              console.warn('Real-time Player 1 extraction error:', extErr.message);
             }
           }
 
@@ -435,38 +417,24 @@ export class StreamResolverService {
 
             const sDocId = (sDoc as any).id || (sDoc as any)._id?.toString();
 
-            // SERVER 1 for Series: Extract permanent M3U8 from watch_1_embed and save to DB
-            let epM3u8NeedsExtraction =
-              forceRefresh ||
-              !streams.m3u8_url ||
-              !isDirectStream(streams.m3u8_url) ||
-              !isM3u8TokenValid(streams.m3u8_url);
-
-            if (!epM3u8NeedsExtraction && streams.m3u8_url) {
-              const alive = await isStreamUrlAlive(streams.m3u8_url, 1500);
-              if (!alive) {
-                console.log(`[StreamResolver] Episode M3U8 failed health check (HTTP 403). Invalidation triggered for: ${sDoc.title}`);
-                epM3u8NeedsExtraction = true;
-              }
-            }
-
-            if (epM3u8NeedsExtraction && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
+            // SERVER 1 for Series: Real-time M3U8 extraction on-the-fly from watch_1_embed (NOT using stale DB m3u8_url)
+            if (streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
               try {
-                const directM3u8 = await extractDirectM3u8(streams.watch_embed);
-                if (directM3u8) {
-                  streams.m3u8_url = directM3u8;
-                  await saveDirectM3u8({
+                livePlayer1M3u8 = await extractDirectM3u8(streams.watch_embed);
+                if (livePlayer1M3u8) {
+                  streams.m3u8_url = livePlayer1M3u8;
+                  saveDirectM3u8({
                     id: sDocId,
                     title: sDoc.title,
                     type: 'series',
                     season,
                     episode,
                     player: 1,
-                    m3u8Url: directM3u8,
-                  });
+                    m3u8Url: livePlayer1M3u8,
+                  }).catch(() => {});
                 }
               } catch (extErr: any) {
-                console.warn('On-the-fly Player 1 M3U8 extraction error for episode:', extErr.message);
+                console.warn('Real-time Player 1 extraction error for episode:', extErr.message);
               }
             }
 
@@ -500,8 +468,26 @@ export class StreamResolverService {
     };
 
     // SERVER 1 (Primary Stream):
-    // Use the permanent direct .m3u8 saved in the DB
-    if (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) && isM3u8TokenValid(streams.m3u8_url)) {
+    // Real-time extracted .m3u8 directly from watch_embed (not stale DB link)
+    if (livePlayer1M3u8 && isDirectStream(livePlayer1M3u8)) {
+      const isHls = livePlayer1M3u8.includes('.m3u8');
+      sources.push({
+        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Fast Stream)',
+        url: livePlayer1M3u8.trim(),
+        format: isHls ? 'hls' : 'mp4',
+        headers: getHeadersForStreamUrl(livePlayer1M3u8),
+      });
+    } else if (streams && streams.watch_embed) {
+      const normW1 = normalizeStreamUrl(streams.watch_embed);
+      if (isLinkValid(normW1)) {
+        sources.push({
+          quality: '🎬 Server 1: Primary Stream',
+          url: normW1,
+          format: normW1.includes('.m3u8') ? 'hls' : isDirectStream(normW1) ? 'mp4' : 'embed',
+          headers: getHeadersForStreamUrl(normW1),
+        });
+      }
+    } else if (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url)) {
       const isHls = streams.m3u8_url.includes('.m3u8');
       sources.push({
         quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Fast Stream)',
@@ -509,17 +495,6 @@ export class StreamResolverService {
         format: isHls ? 'hls' : 'mp4',
         headers: getHeadersForStreamUrl(streams.m3u8_url),
       });
-    } else if (streams && streams.watch_embed) {
-      const normW1 = normalizeStreamUrl(streams.watch_embed);
-      if (isLinkValid(normW1)) {
-        const isDirect = isDirectStream(normW1);
-        sources.push({
-          quality: '🎬 Server 1: Primary Stream',
-          url: normW1,
-          format: normW1.includes('.m3u8') ? 'hls' : isDirect ? 'mp4' : 'embed',
-          headers: getHeadersForStreamUrl(normW1),
-        });
-      }
     }
 
     // SERVER 2 (Alternate Player):
@@ -584,7 +559,7 @@ export class StreamResolverService {
       title: targetTitle,
       type,
       sources,
-      m3u8_url: streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) ? streams.m3u8_url.trim() : undefined,
+      m3u8_url: livePlayer1M3u8 && isDirectStream(livePlayer1M3u8) ? livePlayer1M3u8.trim() : (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) ? streams.m3u8_url.trim() : undefined),
       player_2_m3u8_url: livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined,
       watch_embed_url: streams && streams.watch_embed ? normalizeStreamUrl(streams.watch_embed) : undefined,
       subtitles,
