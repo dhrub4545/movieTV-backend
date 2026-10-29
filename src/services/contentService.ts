@@ -1,6 +1,7 @@
 import { Movie, Series } from '../db';
 import { HomeFeed, MediaItem } from '../types';
 import { scraperPipelineService } from './scraperPipelineService';
+import { isM3u8TokenValid } from './streamResolverService';
 
 function extractYear(title: string): string {
   const rangeMatch = title.match(/\b(?:19|20)\d{2}\s*[-–]\s*((?:19|20)\d{2})\b/);
@@ -101,8 +102,8 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     genres: [region, cat, 'HD'],
     duration: 'Full Movie',
     quality,
-    streamUrl: doc.streams?.m3u8_url || undefined,
-    m3u8_url: doc.streams?.m3u8_url || undefined,
+    streamUrl: doc.streams?.m3u8_url && isM3u8TokenValid(doc.streams.m3u8_url) ? doc.streams.m3u8_url : undefined,
+    m3u8_url: doc.streams?.m3u8_url && isM3u8TokenValid(doc.streams.m3u8_url) ? doc.streams.m3u8_url : undefined,
     player_2_m3u8_url: undefined,
   };
 }

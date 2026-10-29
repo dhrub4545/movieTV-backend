@@ -8,6 +8,42 @@ import { resolveGreenmotors } from './greenmotorsResolver';
 export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
 
 /**
+ * Checks if a direct .m3u8 or streaming URL has an expired token.
+ * Accurately calculates expiration for:
+ * - HDStream4u acek-cdn / dramiyos-cdn: s=<start_time_sec> & e=<duration_sec> -> expires at (s + e)
+ * - Hubstream: kx=<timestamp_sec>
+ * - multidownload / multicloudlinks: exp=<timestamp_sec>
+ */
+export function isM3u8TokenValid(url: string): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // HDStream4u acek-cdn / dramiyos-cdn: s=<start_sec>&e=<duration_sec>
+  const matchS = url.match(/[?&]s=(\d+)/);
+  const matchE = url.match(/[?&]e=(\d+)/);
+  if (matchS && matchE) {
+    const expiresAt = parseInt(matchS[1], 10) + parseInt(matchE[1], 10);
+    return expiresAt > nowSec + 180;
+  }
+
+  // Hubstream: kx=<timestamp>
+  const matchKx = url.match(/[?&]kx=(\d+)/);
+  if (matchKx) {
+    const kx = parseInt(matchKx[1], 10);
+    return kx > nowSec + 120;
+  }
+
+  // multidownload / multicloudlinks: exp=<timestamp>
+  const matchExp = url.match(/[?&]exp=(\d+)/);
+  if (matchExp) {
+    const exp = parseInt(matchExp[1], 10);
+    return exp > nowSec + 120;
+  }
+
+  return true;
+}
+
+/**
  * Saves an extracted permanent direct .m3u8 link into MongoDB database for Movie or Series episode
  * Specifically for Server 1 (watch_embed -> streams.m3u8_url).
  * Player 2 links are dynamic live links and are NOT persisted to the database.
@@ -141,23 +177,6 @@ export class StreamResolverService {
     const { id, title, type = 'movie', season = 1, episode = 1 } = params;
     const cacheKey = `${id || ''}-${title || ''}-${type}-${season}-${episode}`;
 
-    const isM3u8TokenValid = (url: string) => {
-      if (!url) return false;
-      const matchKx = url.match(/[?&]kx=(\d+)/);
-      if (matchKx) {
-        const kx = parseInt(matchKx[1], 10);
-        const nowSec = Math.floor(Date.now() / 1000);
-        return kx > nowSec + 120;
-      }
-      const matchExp = url.match(/[?&]exp=(\d+)/);
-      if (matchExp) {
-        const exp = parseInt(matchExp[1], 10);
-        const nowSec = Math.floor(Date.now() / 1000);
-        return exp > nowSec + 120;
-      }
-      return true;
-    };
-
     const isDirectStream = (url: string) => {
       if (!url) return false;
       return (
@@ -169,12 +188,14 @@ export class StreamResolverService {
       );
     };
 
-    // Check in-memory cache
+    // Check in-memory cache: ensure both Server 1 and Server 2 tokens are currently valid
     const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
+      const p1Source = cached.data.sources.find((s) => s.quality.includes('Server 1'));
       const p2Source = cached.data.sources.find((s) => s.quality.includes('Server 2'));
-      // If cached Player 2 token is still active, return cached response; otherwise re-resolve live
-      if (!p2Source || !p2Source.url || !isDirectStream(p2Source.url) || isM3u8TokenValid(p2Source.url)) {
+      const p1Valid = !p1Source || !p1Source.url || !isDirectStream(p1Source.url) || isM3u8TokenValid(p1Source.url);
+      const p2Valid = !p2Source || !p2Source.url || !isDirectStream(p2Source.url) || isM3u8TokenValid(p2Source.url);
+      if (p1Valid && p2Valid) {
         return cached.data;
       }
     }

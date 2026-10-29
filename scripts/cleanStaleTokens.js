@@ -72,3 +72,4 @@ const { extractDirectM3u8 } = require('../dist/services/m3u8Extractor');
     process.exit(1);
   }
 })();
+
