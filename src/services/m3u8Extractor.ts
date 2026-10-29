@@ -1,5 +1,16 @@
 import axios from 'axios';
 import crypto from 'crypto';
+import https from 'https';
+
+// High-throughput insecure HTTPS agent for personal use (ignores SSL expiration, reuses sockets)
+const insecureAgent = new https.Agent({
+  rejectUnauthorized: false,
+  keepAlive: true,
+  maxSockets: 64,
+});
+
+// In-memory cache for extracted M3U8 URLs (TTL: 15 minutes)
+const extractionCache = new Map<string, { m3u8: string; expiresAt: number }>();
 
 export function unpackDeanEdwards(packed: string): string {
   try {
@@ -101,6 +112,7 @@ export async function extractHubstreamM3u8(url: string): Promise<string | null> 
             Referer: 'https://hubstream.art/',
           },
           timeout: 15000,
+          httpsAgent: insecureAgent,
         });
         if (res && res.status === 200 && res.data) break;
       } catch (err) {
@@ -139,12 +151,22 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
   let targetUrl = url.trim();
 
   if (targetUrl.includes('.m3u8')) return targetUrl;
+
+  // Check in-memory extraction cache
+  const cached = extractionCache.get(targetUrl);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.m3u8;
+  }
+
   if (targetUrl.includes('/file/')) targetUrl = targetUrl.replace('/file/', '/embed/');
 
   // 1. Hubstream AES video extraction
   if (targetUrl.includes('hubstream') || targetUrl.includes('/meb/') || targetUrl.includes('/unl/') || targetUrl.includes('#')) {
     const hs = await extractHubstreamM3u8(targetUrl);
-    if (hs) return hs;
+    if (hs) {
+      extractionCache.set(url.trim(), { m3u8: hs, expiresAt: Date.now() + 15 * 60 * 1000 });
+      return hs;
+    }
   }
 
   // 2. HTTP page fetching & Dean Edwards / Regex extraction
@@ -157,25 +179,39 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
         Referer: origin + '/',
       },
       timeout: 8000,
+      httpsAgent: insecureAgent,
     });
     const html = typeof resp.data === 'string' ? resp.data : '';
     if (!html) return null;
 
+    let foundM3u8: string | null = null;
+
     // A. Direct match in html
     const directMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-    if (directMatch) return directMatch[0];
+    if (directMatch) foundM3u8 = directMatch[0];
 
     // B. Dean Edwards packed script
-    const unpacked = unpackDeanEdwards(html);
-    if (unpacked) {
-      const m3u8Match = unpacked.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-      if (m3u8Match) return m3u8Match[0];
+    if (!foundM3u8) {
+      const unpacked = unpackDeanEdwards(html);
+      if (unpacked) {
+        const m3u8Match = unpacked.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+        if (m3u8Match) {
+          foundM3u8 = m3u8Match[0];
+        } else {
+          const streamMatch = unpacked.match(/\/stream\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+          if (streamMatch) {
+            foundM3u8 = origin + streamMatch[0];
+          } else {
+            const relMatch = unpacked.match(/["'](\/[^"']+\.m3u8[^"']*)["']/i);
+            if (relMatch) foundM3u8 = origin + relMatch[1];
+          }
+        }
+      }
+    }
 
-      const streamMatch = unpacked.match(/\/stream\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-      if (streamMatch) return origin + streamMatch[0];
-
-      const relMatch = unpacked.match(/["'](\/[^"']+\.m3u8[^"']*)["']/i);
-      if (relMatch) return origin + relMatch[1];
+    if (foundM3u8) {
+      extractionCache.set(url.trim(), { m3u8: foundM3u8, expiresAt: Date.now() + 15 * 60 * 1000 });
+      return foundM3u8;
     }
 
     return null;

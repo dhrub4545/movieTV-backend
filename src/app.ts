@@ -1,3 +1,4 @@
+import compression from 'compression';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express, { Application, Request, Response } from 'express';
@@ -18,6 +19,9 @@ dotenv.config();
 scraperPipelineService.setContentService(contentService);
 
 export const app: Application = express();
+
+// High-speed compression middleware: reduces JSON feed payload by ~80%
+app.use(compression());
 
 // Middlewares
 app.use(cors());
