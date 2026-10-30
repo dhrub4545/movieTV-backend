@@ -70,7 +70,7 @@ export async function isStreamUrlAlive(url: string, timeoutMs: number = 3000): P
  */
 export function isM3u8TokenValid(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
-  if (url.includes('&asn=&') || url.endsWith('&asn=') || url.includes('asn=14618')) return false;
+  if (url.includes('&asn=&') || url.endsWith('&asn=')) return false;
   const nowSec = Math.floor(Date.now() / 1000);
 
   // HDStream4u acek-cdn / dramiyos-cdn: s=<start_sec>&e=<duration_sec>
@@ -128,7 +128,7 @@ export async function saveDirectM3u8(params: {
   }
 
   // Reject URLs with empty asn= parameter or broken tokens
-  if (m3u8Url.includes('&asn=&') || m3u8Url.endsWith('&asn=') || m3u8Url.includes('asn=14618')) {
+  if (m3u8Url.includes('&asn=&') || m3u8Url.endsWith('&asn=')) {
     console.warn(`[StreamResolver] Rejecting save for M3U8 with empty asn: ${m3u8Url}`);
     return false;
   }
@@ -384,8 +384,14 @@ export class StreamResolverService {
             } catch {}
           }
 
-          // SERVER 1: Real-time .m3u8 extraction on-the-fly from watch_embed (NOT using stale DB m3u8_url)
-          if (streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
+          // SERVER 1: Use valid permanent M3U8 from DB, or extract on-the-fly from watch_embed if missing/expired
+          const hasDbValidM3u8 = Boolean(
+            streams.m3u8_url &&
+            streams.m3u8_url.includes('.m3u8') &&
+            isM3u8TokenValid(streams.m3u8_url)
+          );
+
+          if (!hasDbValidM3u8 && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
             try {
               livePlayer1M3u8 = await extractDirectM3u8(streams.watch_embed);
               if (livePlayer1M3u8) {
@@ -516,8 +522,14 @@ export class StreamResolverService {
               }
             }
 
-            // SERVER 1 for Series: Real-time M3U8 extraction on-the-fly from watch_1_embed (NOT using stale DB m3u8_url)
-            if (streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
+            // SERVER 1 for Series: Use valid permanent M3U8 from DB, or extract on-the-fly from watch_1_embed if missing/expired
+            const hasSeriesDbValidM3u8 = Boolean(
+              streams.m3u8_url &&
+              streams.m3u8_url.includes('.m3u8') &&
+              isM3u8TokenValid(streams.m3u8_url)
+            );
+
+            if (!hasSeriesDbValidM3u8 && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
               try {
                 livePlayer1M3u8 = await extractDirectM3u8(streams.watch_embed);
                 if (livePlayer1M3u8) {
@@ -566,12 +578,12 @@ export class StreamResolverService {
       return url.length > 0 && !url.includes('/file/') && (url.startsWith('http') || url.startsWith('//') || url.includes('#'));
     };
 
-    // SERVER 1 (Primary Stream): Strictly prioritize .m3u8 links for Player 1
-    const p1Hls = (livePlayer1M3u8 && livePlayer1M3u8.includes('.m3u8'))
-      ? livePlayer1M3u8
-      : (streams && streams.m3u8_url && streams.m3u8_url.includes('.m3u8') && !streams.m3u8_url.includes('asn=14618'))
+    // SERVER 1 (Primary Stream): Strictly prioritize valid .m3u8 links for Player 1
+    const p1Hls = (streams && streams.m3u8_url && streams.m3u8_url.includes('.m3u8') && isM3u8TokenValid(streams.m3u8_url))
       ? streams.m3u8_url
-      : (livePlayer2M3u8 && livePlayer2M3u8.includes('.m3u8'))
+      : (livePlayer1M3u8 && livePlayer1M3u8.includes('.m3u8') && isM3u8TokenValid(livePlayer1M3u8))
+      ? livePlayer1M3u8
+      : (livePlayer2M3u8 && livePlayer2M3u8.includes('.m3u8') && isM3u8TokenValid(livePlayer2M3u8))
       ? livePlayer2M3u8
       : null;
 
@@ -590,7 +602,15 @@ export class StreamResolverService {
         format: isHls ? 'hls' : 'mp4',
         headers: getHeadersForStreamUrl(livePlayer1M3u8),
       });
-    } else if (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) && !streams.m3u8_url.includes('asn=14618')) {
+    } else if (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url)) {
+      const isHls = streams.m3u8_url.includes('.m3u8');
+      sources.push({
+        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Stream)',
+        url: streams.m3u8_url.trim(),
+        format: isHls ? 'hls' : 'mp4',
+        headers: getHeadersForStreamUrl(streams.m3u8_url),
+      });
+    } else if (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8)) {
       const isHls = streams.m3u8_url.includes('.m3u8');
       sources.push({
         quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Stream)',
@@ -697,7 +717,7 @@ export class StreamResolverService {
       title: targetTitle,
       type,
       sources,
-      m3u8_url: livePlayer1M3u8 && isDirectStream(livePlayer1M3u8) ? livePlayer1M3u8.trim() : (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) && !streams.m3u8_url.includes('asn=14618') ? streams.m3u8_url.trim() : (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined)),
+      m3u8_url: livePlayer1M3u8 && isDirectStream(livePlayer1M3u8) ? livePlayer1M3u8.trim() : (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) ? streams.m3u8_url.trim() : (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined)),
       player_2_m3u8_url: livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined,
       watch_embed_url: streams && streams.watch_embed ? normalizeStreamUrl(streams.watch_embed) : undefined,
       player_2_url: streams && streams.player_2 ? normalizeStreamUrl(streams.player_2) : undefined,
