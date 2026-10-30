@@ -64,22 +64,29 @@ app.post('/api/crash-report', (req: Request, res: Response) => {
 
 // Instant Mobile Download Endpoint: Download fresh APK directly from mobile phone browser
 app.get('/apk', (_req: Request, res: Response) => {
-  const apkPath = path.resolve(
+  const localApk = path.resolve(__dirname, '../MovieTV.apk');
+  const repoApk = path.resolve(
     __dirname,
     '../../frontend/app/build/outputs/apk/debug/app-debug.apk',
   );
-  if (fs.existsSync(apkPath)) {
-    res.download(apkPath, 'MovieTV.apk');
+  const rootApk = path.resolve(__dirname, '../../MovieTV.apk');
+
+  const finalApkPath = [localApk, repoApk, rootApk].find((p) => fs.existsSync(p));
+  if (finalApkPath) {
+    res.download(finalApkPath, 'MovieTV.apk');
   } else {
     res.status(404).send('APK not found. Please build the frontend project first.');
   }
 });
 
-// Static frontend web dashboard (React build in frontendweb/dist or fallback to frontendweb)
-const frontendDistPath = path.resolve(__dirname, '../../frontendweb/dist');
-const frontendWebPath = fs.existsSync(frontendDistPath)
-  ? frontendDistPath
-  : path.resolve(__dirname, '../../frontendweb');
+// Static frontend web dashboard (React build in frontend-web/dist or frontendweb/dist)
+const candidates = [
+  path.resolve(__dirname, '../../frontend-web/dist'),
+  path.resolve(__dirname, '../../frontendweb/dist'),
+  path.resolve(__dirname, '../../frontend-web'),
+  path.resolve(__dirname, '../../frontendweb'),
+];
+const frontendWebPath = candidates.find((p) => fs.existsSync(p)) || path.resolve(__dirname, '../../frontendweb');
 
 if (fs.existsSync(frontendWebPath)) {
   app.use('/web', express.static(frontendWebPath));

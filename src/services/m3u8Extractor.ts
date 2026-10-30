@@ -25,7 +25,7 @@ export function unpackDeanEdwards(packed: string): string {
     const k = kStr.split('|');
     while (c--) {
       if (k[c]) {
-        p = p.replace(new RegExp('\\b' + c.toString(a) + '\\b', 'g'), k[c]);
+        p = p.replace(new RegExp('\\b' + c.toString(a) + '\\b', 'g'), () => k[c]);
       }
     }
     return p;
@@ -199,6 +199,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
     targetUrl.includes('.m3u8') ||
     targetUrl.includes('action=watch') ||
     targetUrl.includes('multidownload.lol') ||
+    targetUrl.includes('uprising.best') ||
     targetUrl.endsWith('.mp4') ||
     targetUrl.endsWith('.mkv')
   ) {
@@ -262,7 +263,30 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
 
     let foundM3u8: string | null = null;
 
-    // A. streamSrc match (e.g. multicloudlinks, multidownload)
+        // 1. window.__PA_PLAY__ (Play4u or clones)
+    const paMatch = html.match(/window\.__PA_PLAY__\s*=\s*(\{[\s\S]*?\});/);
+    if (paMatch) {
+      try {
+        const paData = JSON.parse(paMatch[1]);
+        const streamUrl = paData?.streams?.[0]?.m3u8_url || paData?.item?.video_url;
+        if (streamUrl) {
+          foundM3u8 = streamUrl.includes('.m3u8')
+            ? streamUrl
+            : `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}ext=.m3u8`;
+        }
+      } catch {}
+    }
+
+    // 2. Play4u / uprising direct range image stream
+    if (!foundM3u8) {
+      const uprisingMatch = html.match(/https?:\/\/[^\s"'<>]+\/range\/[a-zA-Z0-9_-]+\.png[^\s"'<>]*/i);
+      if (uprisingMatch) {
+        const uUrl = uprisingMatch[0];
+        foundM3u8 = `${uUrl}${uUrl.includes('?') ? '&' : '?'}ext=.m3u8`;
+      }
+    }
+
+    // 3. streamSrc match (e.g. multicloudlinks, multidownload)
     const streamSrcMatch =
       html.match(/(?:const|var|let)\s+streamSrc\s*=\s*["']([^"']+)["']/i) ||
       html.match(/["'](https?:\/\/[^"']+(?:action=watch|multidownload)[^"']*)["']/i);
