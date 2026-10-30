@@ -238,7 +238,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
   }
 
   // 2. Hubstream AES video extraction
-  if (targetUrl.includes('hubstream') || targetUrl.includes('/meb/') || targetUrl.includes('/unl/') || targetUrl.includes('#')) {
+  if (targetUrl.includes('hubstream') || targetUrl.includes('/meb/') || targetUrl.includes('/unl/') || (targetUrl.includes('#') && targetUrl.includes('hubstream'))) {
     const hs = await extractHubstreamM3u8(targetUrl);
     if (hs) {
       extractionCache.set(url.trim(), { m3u8: hs, expiresAt: Date.now() + 15 * 60 * 1000 });

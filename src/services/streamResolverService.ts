@@ -13,7 +13,14 @@ export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
  */
 export function getHeadersForStreamUrl(url: string): Record<string, string> {
   if (!url) return {};
-  if (url.includes('hubstream') || url.includes('skyline') || url.includes('greenstream') || url.includes('94.131.217')) {
+  if (
+    url.includes('hubstream') ||
+    url.includes('skyline') ||
+    url.includes('greenstream') ||
+    url.includes('vertexgrowthworks') ||
+    url.includes('summitnetworksolutions') ||
+    url.includes('94.131.217')
+  ) {
     return {
       Referer: 'https://hubstream.art/',
       Origin: 'https://hubstream.art',
@@ -70,6 +77,7 @@ export async function isStreamUrlAlive(url: string, timeoutMs: number = 3000): P
  */
 export function isM3u8TokenValid(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
+  if (url.includes('asn=14618')) return false;
   if (url.includes('&asn=&') || url.endsWith('&asn=')) return false;
   const nowSec = Math.floor(Date.now() / 1000);
 
@@ -127,9 +135,9 @@ export async function saveDirectM3u8(params: {
     return true;
   }
 
-  // Reject URLs with empty asn= parameter or broken tokens
-  if (m3u8Url.includes('&asn=&') || m3u8Url.endsWith('&asn=')) {
-    console.warn(`[StreamResolver] Rejecting save for M3U8 with empty asn: ${m3u8Url}`);
+  // Reject URLs with empty asn= parameter, broken tokens, or Vercel AWS tokens (asn=14618)
+  if (m3u8Url.includes('&asn=&') || m3u8Url.endsWith('&asn=') || m3u8Url.includes('asn=14618')) {
+    console.warn(`[StreamResolver] Rejecting save for M3U8 with invalid/Vercel asn: ${m3u8Url}`);
     return false;
   }
 
@@ -393,8 +401,9 @@ export class StreamResolverService {
 
           if (!hasDbValidM3u8 && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
             try {
-              livePlayer1M3u8 = await extractDirectM3u8(streams.watch_embed);
-              if (livePlayer1M3u8) {
+              const extracted = await extractDirectM3u8(streams.watch_embed);
+              if (extracted && !extracted.includes('asn=14618')) {
+                livePlayer1M3u8 = extracted;
                 streams.m3u8_url = livePlayer1M3u8;
                 saveDirectM3u8({
                   id: docId,
@@ -531,8 +540,9 @@ export class StreamResolverService {
 
             if (!hasSeriesDbValidM3u8 && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
               try {
-                livePlayer1M3u8 = await extractDirectM3u8(streams.watch_embed);
-                if (livePlayer1M3u8) {
+                const sExtracted = await extractDirectM3u8(streams.watch_embed);
+                if (sExtracted && !sExtracted.includes('asn=14618')) {
+                  livePlayer1M3u8 = sExtracted;
                   streams.m3u8_url = livePlayer1M3u8;
                   saveDirectM3u8({
                     id: sDocId,
