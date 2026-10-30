@@ -566,15 +566,26 @@ export class StreamResolverService {
       return url.length > 0 && !url.includes('/file/') && (url.startsWith('http') || url.startsWith('//') || url.includes('#'));
     };
 
-    // SERVER 1 (Primary Stream):
-    // Priority order:
-    // 1. Fresh real-time direct M3U8 extracted on-the-fly
-    // 2. Direct playable stream in DB (if valid and not datacenter IP-locked)
-    // 3. Fallback to Server 2's direct live HLS stream so Player 1 ALWAYS plays smoothly without manifest malformed error
-    if (livePlayer1M3u8 && isDirectStream(livePlayer1M3u8)) {
+    // SERVER 1 (Primary Stream): Strictly prioritize .m3u8 links for Player 1
+    const p1Hls = (livePlayer1M3u8 && livePlayer1M3u8.includes('.m3u8'))
+      ? livePlayer1M3u8
+      : (streams && streams.m3u8_url && streams.m3u8_url.includes('.m3u8') && !streams.m3u8_url.includes('asn=14618'))
+      ? streams.m3u8_url
+      : (livePlayer2M3u8 && livePlayer2M3u8.includes('.m3u8'))
+      ? livePlayer2M3u8
+      : null;
+
+    if (p1Hls) {
+      sources.push({
+        quality: '🎬 Server 1: Primary Stream (Direct HLS)',
+        url: p1Hls.trim(),
+        format: 'hls',
+        headers: getHeadersForStreamUrl(p1Hls),
+      });
+    } else if (livePlayer1M3u8 && isDirectStream(livePlayer1M3u8)) {
       const isHls = livePlayer1M3u8.includes('.m3u8');
       sources.push({
-        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Fast Stream)',
+        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Stream)',
         url: livePlayer1M3u8.trim(),
         format: isHls ? 'hls' : 'mp4',
         headers: getHeadersForStreamUrl(livePlayer1M3u8),
@@ -582,17 +593,17 @@ export class StreamResolverService {
     } else if (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) && !streams.m3u8_url.includes('asn=14618')) {
       const isHls = streams.m3u8_url.includes('.m3u8');
       sources.push({
-        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Fast Stream)',
+        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Stream)',
         url: streams.m3u8_url.trim(),
         format: isHls ? 'hls' : 'mp4',
         headers: getHeadersForStreamUrl(streams.m3u8_url),
       });
     } else if (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8)) {
-      // Smooth fallback to Live HLS stream for Player 1
+      const isHls = livePlayer2M3u8.includes('.m3u8');
       sources.push({
-        quality: '🎬 Server 1: Primary Stream (Live HLS)',
+        quality: isHls ? '🎬 Server 1: Primary Stream (Live HLS)' : '🎬 Server 1: Primary Stream (Live Stream)',
         url: livePlayer2M3u8.trim(),
-        format: 'hls',
+        format: isHls ? 'hls' : 'mp4',
         headers: getHeadersForStreamUrl(livePlayer2M3u8),
       });
     } else if (streams && streams.watch_embed) {
@@ -607,8 +618,7 @@ export class StreamResolverService {
       }
     }
 
-    // SERVER 2 (Alternate Player):
-    // Use the fresh live .m3u8 extracted dynamically on-the-fly!
+    // SERVER 2 (Alternate Player): Strictly prioritize live .m3u8 link for Player 2
     if (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8)) {
       const isHls = livePlayer2M3u8.includes('.m3u8');
       sources.push({
@@ -617,13 +627,21 @@ export class StreamResolverService {
         format: isHls ? 'hls' : 'mp4',
         headers: getHeadersForStreamUrl(livePlayer2M3u8),
       });
+    } else if (streams && streams.player_2_m3u8_url && isDirectStream(streams.player_2_m3u8_url)) {
+      const isHls = streams.player_2_m3u8_url.includes('.m3u8');
+      sources.push({
+        quality: isHls ? '🍿 Server 2: Alternate Player (Live HLS)' : '🍿 Server 2: Alternate Player (Live Stream)',
+        url: streams.player_2_m3u8_url.trim(),
+        format: isHls ? 'hls' : 'mp4',
+        headers: getHeadersForStreamUrl(streams.player_2_m3u8_url),
+      });
     } else if (streams && streams.player_2) {
       const normP2 = normalizeStreamUrl(streams.player_2);
       if (isLinkValid(normP2)) {
         sources.push({
           quality: '🍿 Server 2: Alternate Player',
           url: normP2,
-          format: 'embed',
+          format: normP2.includes('.m3u8') ? 'hls' : isDirectStream(normP2) ? 'mp4' : 'embed',
           headers: getHeadersForStreamUrl(normP2),
         });
       }
