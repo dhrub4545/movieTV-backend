@@ -457,19 +457,11 @@ export class ScraperPipelineService {
 
           // 1. Existing Movie in DB
           if (inMovie) {
-            liveItems.push(mapMovieToMediaItem(inMovie));
-            const hasStreams = Boolean(inMovie.streams?.watch_embed || inMovie.streams?.player_2);
-            const titleUnchanged = inMovie.full_title === item.fullTitle;
-
-            // Fast skip if movie already has valid streams and title hasn't changed (no quality upgrade)
-            if (hasStreams && titleUnchanged) {
-              skippedCount++;
-              continue;
-            }
-
-            // Movie needs updated stream links or quality upgrade
-            const detailHtml = await this.fetchDetailPage(item.pageUrl);
             let updatedStream = false;
+            let metaChanged = false;
+
+            // Fetch detail page to see if website has new or replaced watch_embed / player_2 stream links
+            const detailHtml = await this.fetchDetailPage(item.pageUrl);
 
             if (detailHtml) {
               const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
@@ -478,96 +470,140 @@ export class ScraperPipelineService {
                 const newRaw = (parsed.streams.watch_raw || '').trim();
                 const newPlayer2 = (parsed.streams.player_2 || '').trim();
                 const newM3u8 = (parsed.streams.m3u8_url || '').trim();
-
                 const newPlayer2M3u8 = (parsed.streams.player_2_m3u8_url || '').trim();
 
-                const oldEmbed = inMovie.streams?.watch_embed || '';
-                const oldRaw = inMovie.streams?.watch_raw || '';
-                const oldPlayer2 = inMovie.streams?.player_2 || '';
-                const oldM3u8 = inMovie.streams?.m3u8_url || '';
-                const oldP2M3u8 = inMovie.streams?.player_2_m3u8_url || '';
+                const oldEmbed = (inMovie.streams?.watch_embed || '').trim();
+                const oldRaw = (inMovie.streams?.watch_raw || '').trim();
+                const oldPlayer2 = (inMovie.streams?.player_2 || '').trim();
+                const oldM3u8 = (inMovie.streams?.m3u8_url || '').trim();
+                const oldP2M3u8 = (inMovie.streams?.player_2_m3u8_url || '').trim();
 
-                const hasNewLinks = newEmbed.length > 0 || newPlayer2.length > 0 || newM3u8.length > 0 || newPlayer2M3u8.length > 0;
-                const isChanged = Boolean(
-                  (newEmbed && newEmbed !== oldEmbed) ||
-                  (newPlayer2 && newPlayer2 !== oldPlayer2) ||
-                  (newRaw && newRaw !== oldRaw) ||
-                  (newM3u8 && newM3u8 !== oldM3u8) ||
-                  (newPlayer2M3u8 && newPlayer2M3u8 !== oldP2M3u8),
-                );
+                const embedChanged = Boolean(newEmbed && newEmbed !== oldEmbed);
+                const player2Changed = Boolean(newPlayer2 && newPlayer2 !== oldPlayer2);
+                const rawChanged = Boolean(newRaw && newRaw !== oldRaw);
+                const m3u8Changed = Boolean(newM3u8 && newM3u8 !== oldM3u8);
+                const p2M3u8Changed = Boolean(newPlayer2M3u8 && newPlayer2M3u8 !== oldP2M3u8);
 
-                if (hasNewLinks) {
+                const isChanged = embedChanged || player2Changed || rawChanged || m3u8Changed || p2M3u8Changed;
+
+                if (isChanged) {
                   if (!inMovie.streams) {
                     inMovie.streams = {};
                   }
-                  if (newEmbed) inMovie.streams.watch_embed = newEmbed;
-                  if (newPlayer2) inMovie.streams.player_2 = newPlayer2;
-                  if (newRaw) inMovie.streams.watch_raw = newRaw;
-                  if (newM3u8) inMovie.streams.m3u8_url = newM3u8;
+                  // Replace previous watch_embed link with the new link if changed or present
+                  if (newEmbed) {
+                    inMovie.streams.watch_embed = newEmbed;
+                    // If watch_embed was replaced, reset old stale m3u8 and set new one if available
+                    if (embedChanged) {
+                      inMovie.streams.m3u8_url = newM3u8 || '';
+                    }
+                  }
+                  // Replace previous player_2 link with the new link if changed or present
+                  if (newPlayer2) {
+                    inMovie.streams.player_2 = newPlayer2;
+                    if (player2Changed) {
+                      inMovie.streams.player_2_m3u8_url = newPlayer2M3u8 || '';
+                    }
+                  }
+                  if (newRaw) {
+                    inMovie.streams.watch_raw = newRaw;
+                  }
+                  if (!embedChanged && newM3u8) {
+                    inMovie.streams.m3u8_url = newM3u8;
+                  }
+                  if (!player2Changed && newPlayer2M3u8) {
+                    inMovie.streams.player_2_m3u8_url = newPlayer2M3u8;
+                  }
 
                   inMovie.markModified('streams');
-                  updatedStream = isChanged;
+                  updatedStream = true;
                 }
               }
             }
 
-            inMovie.updatedAt = new Date();
-            if (item.posterUrl && !inMovie.poster_url) inMovie.poster_url = item.posterUrl;
-            if (item.fullTitle && inMovie.full_title !== item.fullTitle) inMovie.full_title = item.fullTitle;
-            if (item.pageUrl && inMovie.movie_page_url !== item.pageUrl) inMovie.movie_page_url = item.pageUrl;
+            if (item.posterUrl && !inMovie.poster_url) {
+              inMovie.poster_url = item.posterUrl;
+              metaChanged = true;
+            }
+            if (item.fullTitle && inMovie.full_title !== item.fullTitle) {
+              inMovie.full_title = item.fullTitle;
+              metaChanged = true;
+            }
+            if (item.pageUrl && inMovie.movie_page_url !== item.pageUrl) {
+              inMovie.movie_page_url = item.pageUrl;
+              metaChanged = true;
+            }
             if (!inMovie.year || inMovie.year < 1900) {
               inMovie.year = extractReleaseYear(item.displayName, item.fullTitle);
+              metaChanged = true;
             }
             if (inMovie.is_indian === undefined || inMovie.is_indian === null) {
               inMovie.is_indian = isIndianMovie(item.displayName, item.fullTitle);
+              metaChanged = true;
             }
 
-            await inMovie.save();
+            if (updatedStream || metaChanged) {
+              inMovie.updatedAt = new Date();
+              await inMovie.save();
 
-            if (updatedStream) {
-              updatedMoviesCount++;
-              this.totalMoviesUpdated++;
-              console.log(
-                `🔄 [UPDATED MOVIE STREAM] ${inMovie.title}: Replaced old stream link with updated links -> Pushed to TOP!`,
-              );
+              if (updatedStream) {
+                updatedMoviesCount++;
+                this.totalMoviesUpdated++;
+                console.log(
+                  `🔄 [UPDATED MOVIE STREAM] ${inMovie.title}: Replaced old stream links with updated links (watch_embed: ${inMovie.streams?.watch_embed}, player_2: ${inMovie.streams?.player_2}) -> Pushed to TOP!`,
+                );
+              }
             } else {
               skippedCount++;
             }
+
+            liveItems.push(mapMovieToMediaItem(inMovie));
             continue;
           }
 
           // 2. Existing Series in DB
           if (existingSeries) {
-            liveItems.push(mapSeriesToMediaItem(existingSeries));
-            const titleUnchanged = existingSeries.full_title === item.fullTitle;
-            if (titleUnchanged) {
-              skippedCount++;
-              continue; // Series already has latest episodes
-            }
+            let updatedSeries = false;
+            let metaChanged = false;
 
-            // Series has new episodes uploaded
+            // Fetch detail page to see if website has new episodes or replaced stream links
             const detailHtml = await this.fetchDetailPage(item.pageUrl);
             if (detailHtml) {
               const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
               if (parsed.type === 'series' && parsed.seasons) {
                 const updatedCount = this.mergeNewEpisodes(existingSeries, parsed.seasons);
                 if (updatedCount > 0) {
-                  existingSeries.updatedAt = new Date(); // Push to TOP of series!
-                  if (item.posterUrl && !existingSeries.poster_url) existingSeries.poster_url = item.posterUrl;
-                  if (item.fullTitle && existingSeries.full_title !== item.fullTitle) existingSeries.full_title = item.fullTitle;
-                  if (item.pageUrl && existingSeries.movie_page_url !== item.pageUrl) existingSeries.movie_page_url = item.pageUrl;
                   existingSeries.markModified('seasons');
-                  await existingSeries.save();
                   updatedEpisodesCount += updatedCount;
+                  updatedSeries = true;
                   console.log(
-                    `✨ [UPDATED SERIES] ${existingSeries.title}: Updated ${updatedCount} episode(s) -> Pushed to TOP!`,
+                    `✨ [UPDATED SERIES] ${existingSeries.title}: Replaced stream links for ${updatedCount} episode(s) -> Pushed to TOP!`,
                   );
-                  continue;
                 }
               }
             }
 
-            skippedCount++;
+            if (item.posterUrl && !existingSeries.poster_url) {
+              existingSeries.poster_url = item.posterUrl;
+              metaChanged = true;
+            }
+            if (item.fullTitle && existingSeries.full_title !== item.fullTitle) {
+              existingSeries.full_title = item.fullTitle;
+              metaChanged = true;
+            }
+            if (item.pageUrl && existingSeries.movie_page_url !== item.pageUrl) {
+              existingSeries.movie_page_url = item.pageUrl;
+              metaChanged = true;
+            }
+
+            if (updatedSeries || metaChanged) {
+              existingSeries.updatedAt = new Date(); // Push to TOP of series!
+              await existingSeries.save();
+            } else {
+              skippedCount++;
+            }
+
+            liveItems.push(mapSeriesToMediaItem(existingSeries));
             continue;
           }
 
@@ -741,18 +777,24 @@ export class ScraperPipelineService {
 
           if (newEmb && newEmb !== existingEp.watch_1_embed) {
             existingEp.watch_1_embed = newEmb;
+            existingEp.m3u8_url = newM3u8 || ''; // Clear or update old stale m3u8
+            epChanged = true;
+          } else if (newM3u8 && newM3u8 !== existingEp.m3u8_url) {
+            existingEp.m3u8_url = newM3u8;
             epChanged = true;
           }
+
           if (newP2 && newP2 !== existingEp.watch_2) {
             existingEp.watch_2 = newP2;
+            existingEp.player_2_m3u8_url = newP2M3u8 || '';
+            epChanged = true;
+          } else if (newP2M3u8 && newP2M3u8 !== existingEp.player_2_m3u8_url) {
+            existingEp.player_2_m3u8_url = newP2M3u8;
             epChanged = true;
           }
+
           if (newRaw && newRaw !== existingEp.watch_1_raw) {
             existingEp.watch_1_raw = newRaw;
-            epChanged = true;
-          }
-          if (newM3u8 && newM3u8 !== existingEp.m3u8_url) {
-            existingEp.m3u8_url = newM3u8;
             epChanged = true;
           }
 
@@ -769,6 +811,7 @@ export class ScraperPipelineService {
   public async parseMovieOrSeries(
     html: string,
     title: string,
+    options?: { extractM3u8?: boolean },
   ): Promise<{
     type: 'movie' | 'series';
     streams?: { watch_embed: string; watch_raw: string; player_2: string; m3u8_url?: string; player_2_m3u8_url?: string };
@@ -848,7 +891,7 @@ export class ScraperPipelineService {
           }
 
           let m3u8Url = '';
-          if (w1Emb) {
+          if (options?.extractM3u8 && w1Emb) {
             try {
               m3u8Url = (await extractDirectM3u8(w1Emb)) || '';
             } catch {}
@@ -859,7 +902,7 @@ export class ScraperPipelineService {
 
           let p2M3u8 = '';
           const finalW2 = w2Emb || toEmbedLink(currentEpWatch2);
-          if (finalW2) {
+          if (options?.extractM3u8 && finalW2) {
             try {
               p2M3u8 = (await extractDirectM3u8(finalW2)) || '';
             } catch {}
@@ -874,6 +917,7 @@ export class ScraperPipelineService {
             watch_1_raw: w1Raw,
             watch_2: finalW2,
             m3u8_url: m3u8Url,
+            player_2_m3u8_url: p2M3u8,
           });
         }
       }
@@ -1028,8 +1072,13 @@ export class ScraperPipelineService {
       } else if (
         text.includes('PLAYER-2') ||
         text.includes('PLAYER 2') ||
+        text.includes('PLAYER2') ||
         text.includes('SERVER-2') ||
         text.includes('SERVER 2') ||
+        text.includes('SERVER2') ||
+        text.includes('WATCH-2') ||
+        text.includes('WATCH 2') ||
+        text.includes('ALT') ||
         text === '2'
       ) {
         if (!player2Url) player2Url = href;
@@ -1047,11 +1096,16 @@ export class ScraperPipelineService {
     // Fallback: If watchUrl or player2Url is still missing, check known stream hostnames
     if (!watchUrl || !player2Url) {
       const knownStreamHosts = [
-        'hdstream4u.com',
-        'hubstream.art',
-        'vidaraa.cc',
-        'greenmotors.club',
-        'multicloudlinks.com',
+        'hdstream4u',
+        'hubstream',
+        'vidaraa',
+        'greenmotors',
+        'multicloudlinks',
+        'dr1.multidownload',
+        'play4u',
+        'hubcloud',
+        'streamtape',
+        'vidhide',
       ];
       for (const m of allAnchors) {
         const hrefM = m[1].match(/href=["']([^"']+)["']/i);
@@ -1060,7 +1114,7 @@ export class ScraperPipelineService {
         if (knownStreamHosts.some((h) => href.includes(h))) {
           if (!watchUrl) {
             watchUrl = href;
-          } else if (!player2Url && player2Url !== href) {
+          } else if (!player2Url && href !== watchUrl) {
             player2Url = href;
           }
         }
@@ -1094,7 +1148,7 @@ export class ScraperPipelineService {
     }
 
     let m3u8Url = '';
-    if (wEmb) {
+    if (options?.extractM3u8 && wEmb) {
       try {
         m3u8Url = (await extractDirectM3u8(wEmb)) || '';
       } catch {}
@@ -1105,7 +1159,7 @@ export class ScraperPipelineService {
 
     let p2M3u8 = '';
     const finalP2 = p2Emb || toEmbedLink(player2Url);
-    if (finalP2) {
+    if (options?.extractM3u8 && finalP2) {
       try {
         p2M3u8 = (await extractDirectM3u8(finalP2)) || '';
       } catch {}
@@ -1121,6 +1175,7 @@ export class ScraperPipelineService {
         watch_raw: wRaw,
         player_2: finalP2,
         m3u8_url: m3u8Url,
+        player_2_m3u8_url: p2M3u8,
       },
     };
   }

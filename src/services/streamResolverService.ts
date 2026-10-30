@@ -309,33 +309,61 @@ export class StreamResolverService {
           const docId = (doc as any).id || (doc as any)._id?.toString();
           const moviePageUrl = (doc as any).movie_page_url || '';
 
-          // On-the-fly self healing: if direct stream is missing or watch_embed points to hblinks download aggregator
+          // On-the-fly self healing / refresh: check website if forceRefresh is requested,
+          // direct stream is missing/broken, or watch_embed / player_2 is missing/points to aggregator
           const needsHealing =
-            !isDirectStream(streams.m3u8_url) &&
-            (!streams.watch_embed ||
-              streams.watch_embed.includes('hblinks') ||
-              streams.watch_embed.includes('/archives/') ||
-              !streams.watch_embed.startsWith('http'));
+            forceRefresh ||
+            !streams.watch_embed ||
+            !streams.player_2 ||
+            !isDirectStream(streams.m3u8_url) ||
+            streams.watch_embed.includes('hblinks') ||
+            streams.watch_embed.includes('/archives/') ||
+            !streams.watch_embed.startsWith('http');
 
           if (needsHealing && moviePageUrl) {
             try {
-              console.log(`[StreamResolver] Auto-healing missing stream for "${doc.title}" via: ${moviePageUrl}`);
+              console.log(`[StreamResolver] Checking website for new stream links for "${doc.title}" via: ${moviePageUrl}`);
               const detailHtml = await scraperPipelineService.fetchDetailPage(moviePageUrl);
               if (detailHtml) {
                 const parsed = await scraperPipelineService.parseMovieOrSeries(detailHtml, doc.title);
                 if (parsed && parsed.streams) {
-                  streams = {
-                    watch_embed: parsed.streams.watch_embed || streams.watch_embed,
-                    watch_raw: parsed.streams.watch_raw || streams.watch_raw,
-                    player_2: parsed.streams.player_2 || streams.player_2,
-                    m3u8_url: parsed.streams.m3u8_url || streams.m3u8_url,
-                  };
-                  await Movie.updateOne(
-                    { _id: (doc as any)._id },
-                    { $set: { streams } },
-                    { timestamps: false },
-                  );
-                  console.log(`[StreamResolver] Auto-healing succeeded for: ${doc.title}`);
+                  const newEmb = (parsed.streams.watch_embed || '').trim();
+                  const newP2 = (parsed.streams.player_2 || '').trim();
+                  const newRaw = (parsed.streams.watch_raw || '').trim();
+                  const newM3u8 = (parsed.streams.m3u8_url || '').trim();
+                  const newP2M3u8 = (parsed.streams.player_2_m3u8_url || '').trim();
+
+                  let streamChanged = false;
+                  // If new watch_embed link comes in website, replace previous link
+                  if (newEmb && newEmb !== streams.watch_embed) {
+                    streams.watch_embed = newEmb;
+                    streams.m3u8_url = newM3u8 || ''; // Clear old stale m3u8
+                    streamChanged = true;
+                  } else if (newM3u8 && newM3u8 !== streams.m3u8_url) {
+                    streams.m3u8_url = newM3u8;
+                    streamChanged = true;
+                  }
+
+                  // If new player_2 link comes in website, replace previous link
+                  if (newP2 && newP2 !== streams.player_2) {
+                    streams.player_2 = newP2;
+                    streams.player_2_m3u8_url = newP2M3u8 || '';
+                    streamChanged = true;
+                  }
+
+                  if (newRaw && newRaw !== streams.watch_raw) {
+                    streams.watch_raw = newRaw;
+                    streamChanged = true;
+                  }
+
+                  if (streamChanged) {
+                    await Movie.updateOne(
+                      { _id: (doc as any)._id },
+                      { $set: { streams } },
+                      { timestamps: false },
+                    );
+                    console.log(`[StreamResolver] Successfully replaced stream links in DB for: ${doc.title}`);
+                  }
                 }
               }
             } catch (healErr: any) {
@@ -416,6 +444,76 @@ export class StreamResolverService {
             };
 
             const sDocId = (sDoc as any).id || (sDoc as any)._id?.toString();
+            const seriesPageUrl = (sDoc as any).movie_page_url || '';
+
+            // Check if series episode stream needs healing or refresh from website
+            const needsSeriesHealing =
+              forceRefresh ||
+              !streams.watch_embed ||
+              !streams.player_2 ||
+              !isDirectStream(streams.m3u8_url) ||
+              streams.watch_embed.includes('hblinks') ||
+              streams.watch_embed.includes('/archives/') ||
+              !streams.watch_embed.startsWith('http');
+
+            if (needsSeriesHealing && seriesPageUrl) {
+              try {
+                console.log(
+                  `[StreamResolver] Checking website for new episode stream links for "${sDoc.title}" S${season}:E${episode} via: ${seriesPageUrl}`,
+                );
+                const detailHtml = await scraperPipelineService.fetchDetailPage(seriesPageUrl);
+                if (detailHtml) {
+                  const parsed = await scraperPipelineService.parseMovieOrSeries(detailHtml, sDoc.title);
+                  if (parsed.type === 'series' && parsed.seasons) {
+                    const parsedSeason = parsed.seasons[sIdx] || parsed.seasons[0];
+                    const parsedEp =
+                      parsedSeason?.episodes?.find(
+                        (e: any) => e.episode?.toLowerCase() === ep.episode?.toLowerCase(),
+                      ) || parsedSeason?.episodes?.[epIdx];
+
+                    if (parsedEp) {
+                      const newEmb = (parsedEp.watch_1_embed || '').trim();
+                      const newP2 = (parsedEp.watch_2 || '').trim();
+                      const newM3u8 = (parsedEp.m3u8_url || '').trim();
+                      const newP2M3u8 = (parsedEp.player_2_m3u8_url || '').trim();
+
+                      let changed = false;
+                      if (newEmb && newEmb !== streams.watch_embed) {
+                        streams.watch_embed = newEmb;
+                        streams.m3u8_url = newM3u8 || '';
+                        ep.watch_1_embed = newEmb;
+                        ep.m3u8_url = newM3u8 || '';
+                        changed = true;
+                      } else if (newM3u8 && newM3u8 !== streams.m3u8_url) {
+                        streams.m3u8_url = newM3u8;
+                        ep.m3u8_url = newM3u8;
+                        changed = true;
+                      }
+
+                      if (newP2 && newP2 !== streams.player_2) {
+                        streams.player_2 = newP2;
+                        ep.watch_2 = newP2;
+                        ep.player_2_m3u8_url = newP2M3u8 || '';
+                        changed = true;
+                      }
+
+                      if (changed) {
+                        await Series.updateOne(
+                          { _id: (sDoc as any)._id },
+                          { $set: { seasons: sDoc.seasons } },
+                          { timestamps: false },
+                        );
+                        console.log(
+                          `[StreamResolver] Successfully replaced episode stream links in DB for: ${sDoc.title} S${season}:E${episode}`,
+                        );
+                      }
+                    }
+                  }
+                }
+              } catch (healErr: any) {
+                console.warn(`[StreamResolver] Series healing error for ${sDoc.title}:`, healErr.message);
+              }
+            }
 
             // SERVER 1 for Series: Real-time M3U8 extraction on-the-fly from watch_1_embed (NOT using stale DB m3u8_url)
             if (streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
