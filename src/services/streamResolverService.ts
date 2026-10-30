@@ -700,6 +700,7 @@ export class StreamResolverService {
       m3u8_url: livePlayer1M3u8 && isDirectStream(livePlayer1M3u8) ? livePlayer1M3u8.trim() : (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) && !streams.m3u8_url.includes('asn=14618') ? streams.m3u8_url.trim() : (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined)),
       player_2_m3u8_url: livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined,
       watch_embed_url: streams && streams.watch_embed ? normalizeStreamUrl(streams.watch_embed) : undefined,
+      player_2_url: streams && streams.player_2 ? normalizeStreamUrl(streams.player_2) : undefined,
       subtitles,
     };
 

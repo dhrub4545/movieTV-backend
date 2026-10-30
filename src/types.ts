@@ -19,6 +19,8 @@ export interface MediaItem {
   streamUrl?: string; // Direct preview or pre-resolved stream if available
   m3u8_url?: string; // Server 1 direct .m3u8 link from DB
   player_2_m3u8_url?: string; // Server 2 direct .m3u8 link from DB
+  watch_embed_url?: string; // Server 1 embed URL for client-side token extraction
+  player_2_url?: string; // Server 2 embed / hubstream URL for client-side token extraction
   quality?: string; // 'HDCAM' | 'HD' | '4K'
   seasons?: any[];
 }
@@ -65,5 +67,6 @@ export interface StreamResolveResponse {
   m3u8_url?: string;
   player_2_m3u8_url?: string;
   watch_embed_url?: string;
+  player_2_url?: string;
   subtitles: SubtitleTrack[];
 }

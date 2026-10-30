@@ -102,9 +102,13 @@ export function mapMovieToMediaItem(doc: any): MediaItem {
     genres: [region, cat, 'HD'],
     duration: 'Full Movie',
     quality,
-    streamUrl: doc.streams?.m3u8_url && isM3u8TokenValid(doc.streams.m3u8_url) ? doc.streams.m3u8_url : undefined,
+    streamUrl: doc.streams?.m3u8_url && isM3u8TokenValid(doc.streams.m3u8_url)
+      ? doc.streams.m3u8_url
+      : (doc.streams?.watch_embed || undefined),
     m3u8_url: doc.streams?.m3u8_url && isM3u8TokenValid(doc.streams.m3u8_url) ? doc.streams.m3u8_url : undefined,
-    player_2_m3u8_url: undefined,
+    player_2_m3u8_url: doc.streams?.player_2_m3u8_url || undefined,
+    watch_embed_url: doc.streams?.watch_embed || undefined,
+    player_2_url: doc.streams?.player_2 || undefined,
   };
 }
 
