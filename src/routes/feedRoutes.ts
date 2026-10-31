@@ -3,15 +3,15 @@ import { contentService } from '../services/contentService';
 
 export const feedRouter = Router();
  
-// Optimized HTTP Caching headers: enables client (OkHttp) and CDN caching with stale-while-revalidate for sub-second responses and minimum server load
+// Optimized HTTP Caching headers: enables client (OkHttp), browser, and Vercel Edge CDN caching with stale-while-revalidate for sub-50ms responses
 feedRouter.use((req, res, next) => {
   if (req.method === 'GET') {
     if (req.path.startsWith('/movie/') || req.path.startsWith('/series/')) {
-      res.set('Cache-Control', 'public, max-age=600, stale-while-revalidate=1800');
+      res.set('Cache-Control', 'public, max-age=600, s-maxage=3600, stale-while-revalidate=86400');
     } else if (req.query.search) {
-      res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+      res.set('Cache-Control', 'public, max-age=60, s-maxage=120, stale-while-revalidate=300');
     } else {
-      res.set('Cache-Control', 'public, max-age=180, stale-while-revalidate=300');
+      res.set('Cache-Control', 'public, max-age=180, s-maxage=300, stale-while-revalidate=86400');
     }
   }
   next();

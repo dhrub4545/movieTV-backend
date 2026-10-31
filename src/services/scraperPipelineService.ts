@@ -122,10 +122,37 @@ export class ScraperPipelineService {
   }
 
   async getLatestLiveItems(forceRefresh = false): Promise<MediaItem[]> {
-    if (!forceRefresh && this.latestLiveItems.length > 0 && Date.now() - this.latestLiveItemsTime < this.INTERVAL_MS) {
+    const isStale = Date.now() - this.latestLiveItemsTime >= this.INTERVAL_MS;
+
+    // Run scraper pipeline asynchronously in background if stale or force-refreshed, never blocking feed requests
+    if ((isStale || forceRefresh) && !this.isRunning) {
+      this.runPipeline({ maxPages: 2 }).catch((err) => {
+        console.warn('[Scraper Pipeline] Background refresh failed:', err?.message || err);
+      });
+    }
+
+    // Fast return from memory if available
+    if (this.latestLiveItems.length > 0) {
       return this.latestLiveItems;
     }
-    await this.runPipeline({ maxPages: 2 });
+
+    // Fast cold-start recovery from persisted MongoDB ScraperMeta (sub-10ms)
+    try {
+      const meta = await ScraperMeta.findOne({ key: 'global_scraper_status' }).lean();
+      if (
+        meta &&
+        (meta as any).latestLiveItems &&
+        Array.isArray((meta as any).latestLiveItems) &&
+        (meta as any).latestLiveItems.length > 0
+      ) {
+        this.latestLiveItems = (meta as any).latestLiveItems;
+        this.latestLiveItemsTime = meta.lastRunAt ? new Date(meta.lastRunAt).getTime() : Date.now();
+        return this.latestLiveItems;
+      }
+    } catch {
+      // Ignore DB read failure, return whatever memory holds
+    }
+
     return this.latestLiveItems;
   }
 
@@ -704,6 +731,7 @@ export class ScraperPipelineService {
               lastRunAt: this.lastRunAt,
               nextRunAt: this.nextRunAt,
               lastRunResult: this.lastRunResult,
+              latestLiveItems: this.latestLiveItems,
             },
             $inc: {
               totalNewMoviesAdded: newMoviesCount,

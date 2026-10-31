@@ -164,6 +164,7 @@ export class ContentService {
   // Cached total counts to avoid expensive countDocuments on every page
   private totalMoviesCache: number | null = null;
   private totalSeriesCache: number | null = null;
+  private categoryCountsCache = new Map<string, number>();
 
   private async getOrSetCache<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
     const cached = this.queryCache.get(key);
@@ -196,6 +197,7 @@ export class ContentService {
     this.homeFeedCacheTime = 0;
     this.totalMoviesCache = null;
     this.totalSeriesCache = null;
+    this.categoryCountsCache.clear();
     this.queryCache.clear();
     this.inFlight.clear();
   }
@@ -272,7 +274,7 @@ export class ContentService {
 
       // Strictly sort by latest website release order (newest updated/created first)
       const findQuery = Movie.find(query)
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select('id title full_title poster_url poster_filename year is_indian streams')
         .skip(skip)
         .limit(limit)
@@ -291,32 +293,40 @@ export class ContentService {
         };
       }
 
-      // Cache overall total if searching or filtering is not active
-      const shouldCount = options.search || options.category;
+      // Fast count resolution: user searches count dynamically; category and overall feeds use memory cache
+      const categoryKey = options.category?.toLowerCase()?.trim() || '';
       let total = 11182;
 
-      if (shouldCount) {
+      if (options.search) {
         const [docs, count] = await Promise.all([findQuery, Movie.countDocuments(query)]);
-        total = count;
         return {
           items: docs.map(mapMovieToMediaItem),
-          total,
+          total: count,
           page,
-          totalPages: Math.ceil(total / limit),
+          totalPages: Math.ceil(count / limit),
         };
+      }
+
+      if (categoryKey && categoryKey !== 'all') {
+        if (!this.categoryCountsCache.has(categoryKey)) {
+          const count = await Movie.countDocuments(query);
+          this.categoryCountsCache.set(categoryKey, count);
+        }
+        total = this.categoryCountsCache.get(categoryKey) || 5000;
       } else {
         if (this.totalMoviesCache === null) {
           this.totalMoviesCache = await Movie.countDocuments(query);
         }
         total = this.totalMoviesCache;
-        const docs = await findQuery;
-        return {
-          items: docs.map(mapMovieToMediaItem),
-          total,
-          page,
-          totalPages: Math.ceil(total / limit),
-        };
       }
+
+      const docs = await findQuery;
+      return {
+        items: docs.map(mapMovieToMediaItem),
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+      };
     });
   }
 
@@ -367,7 +377,7 @@ export class ContentService {
 
       // Sort strictly by latest website release order (newest updated/created first)
       const findQuery = Series.find(query)
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select('id title full_title poster_url poster_filename seasons')
         .skip(skip)
         .limit(limit)
@@ -484,12 +494,12 @@ export class ContentService {
                 const needed = limit - slice.length;
                 const liveTitles = new Set(liveItems.map((i) => i.title.toLowerCase()));
                 const olderMovies = await Movie.find(query)
-                  .sort({ year: -1, updatedAt: -1, _id: -1 })
+                  .sort({ updatedAt: -1, createdAt: -1 })
                   .select('id title full_title poster_url poster_filename year is_indian streams')
                   .limit(needed + 30)
                   .lean();
                 const olderSeries = await Series.find(query)
-                  .sort({ updatedAt: -1, _id: -1 })
+                  .sort({ updatedAt: -1, createdAt: -1 })
                   .select('id title full_title poster_url poster_filename seasons')
                   .limit(needed + 30)
                   .lean();
@@ -517,13 +527,13 @@ export class ContentService {
 
       const [movies, series] = await Promise.all([
         Movie.find(query)
-          .sort({ year: -1, updatedAt: -1, _id: -1 })
+          .sort({ updatedAt: -1, createdAt: -1 })
           .select('id title full_title poster_url poster_filename year is_indian streams updatedAt')
           .skip(halfSkip)
           .limit(halfLimit + 10)
           .lean(),
         Series.find(query)
-          .sort({ updatedAt: -1, _id: -1 })
+          .sort({ updatedAt: -1, createdAt: -1 })
           .select('id title full_title poster_url poster_filename seasons updatedAt')
           .skip(halfSkip)
           .limit(halfLimit + 10)
@@ -566,7 +576,7 @@ export class ContentService {
 
     const [latestMovies, indianMovies, nonIndianMovies, bollywood, southDubbed, hollywood, webSeries] = await Promise.all([
       Movie.find(baseMovieFilter)
-        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -574,7 +584,7 @@ export class ContentService {
         ...baseMovieFilter,
         is_indian: true,
       })
-        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -582,7 +592,7 @@ export class ContentService {
         ...baseMovieFilter,
         is_indian: false,
       })
-        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -590,7 +600,7 @@ export class ContentService {
         ...baseMovieFilter,
         $or: [{ full_title: /hindi/i }, { title: /hindi/i }],
       })
-        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -601,7 +611,7 @@ export class ContentService {
           { title: /telugu|tamil|kannada|malayalam/i },
         ],
       })
-        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -609,7 +619,7 @@ export class ContentService {
         ...baseMovieFilter,
         $or: [{ full_title: /dual audio|english/i }, { title: /dual audio|english/i }],
       })
-        .sort({ year: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select(projection)
         .limit(20)
         .lean(),
@@ -617,7 +627,7 @@ export class ContentService {
         title: adultFilter,
         full_title: adultFilter,
       })
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .select('id title full_title poster_url poster_filename seasons')
         .limit(20)
         .lean(),

@@ -154,6 +154,7 @@ export interface IScraperMeta extends Document {
   totalMoviesUpdated: number;
   totalEpisodesUpdated: number;
   lastRunResult?: any;
+  latestLiveItems?: any[];
 }
 
 const ScraperMetaSchema = new Schema<IScraperMeta>(
@@ -167,6 +168,7 @@ const ScraperMetaSchema = new Schema<IScraperMeta>(
     totalMoviesUpdated: { type: Number, default: 0 },
     totalEpisodesUpdated: { type: Number, default: 0 },
     lastRunResult: { type: Schema.Types.Mixed, default: null },
+    latestLiveItems: { type: Schema.Types.Mixed, default: [] },
   },
   { timestamps: true },
 );
