@@ -451,21 +451,29 @@ export class ScraperPipelineService {
         }),
       ]);
 
-      const movieMap = new Map<string, any>();
+      const movieMapByUrl = new Map<string, any>();
+      const movieMapByTitle = new Map<string, any>();
       for (const m of existingMovies) {
-        if (m.movie_page_url) movieMap.set(m.movie_page_url, m);
-        if (m.title) movieMap.set(m.title, m);
+        if (m.movie_page_url) movieMapByUrl.set(m.movie_page_url.replace(/\/+$/, ''), m);
+        const existing = movieMapByTitle.get(m.title);
+        if (!existing || new Date(m.updatedAt || 0) > new Date(existing.updatedAt || 0)) {
+          movieMapByTitle.set(m.title, m);
+        }
       }
 
-      const seriesMap = new Map<string, any>();
+      const seriesMapByUrl = new Map<string, any>();
+      const seriesMapByTitle = new Map<string, any>();
       for (const s of existingSeriesList) {
-        if (s.movie_page_url) seriesMap.set(s.movie_page_url, s);
-        if (s.title) seriesMap.set(s.title, s);
+        if (s.movie_page_url) seriesMapByUrl.set(s.movie_page_url.replace(/\/+$/, ''), s);
+        const existing = seriesMapByTitle.get(s.title);
+        if (!existing || new Date(s.updatedAt || 0) > new Date(existing.updatedAt || 0)) {
+          seriesMapByTitle.set(s.title, s);
+        }
       }
 
       const liveItems: MediaItem[] = [];
 
-      // Process each discovered item
+      // Process each discovered item in exact website order
       for (const item of discoveredItems) {
         try {
           const isToxic = /\btoxic\b/i.test(`${item.displayName} ${item.fullTitle} ${item.pageUrl}`);
@@ -479,71 +487,30 @@ export class ScraperPipelineService {
             continue; // Filter out 18+ adult content
           }
 
-          const inMovie = movieMap.get(item.pageUrl) || movieMap.get(item.displayName);
-          const existingSeries = seriesMap.get(item.pageUrl) || seriesMap.get(item.displayName);
+          const cleanUrl = item.pageUrl.replace(/\/+$/, '');
+          const inMovie = movieMapByUrl.get(cleanUrl) || movieMapByTitle.get(item.displayName);
+          const existingSeries = seriesMapByUrl.get(cleanUrl) || seriesMapByTitle.get(item.displayName);
 
           // 1. Existing Movie in DB
           if (inMovie) {
+            const hasWorkingStream = Boolean(inMovie.streams?.watch_embed || inMovie.streams?.player_2);
+            const qualityUpgraded = Boolean(
+              item.fullTitle && inMovie.full_title && item.fullTitle !== inMovie.full_title,
+            );
             let updatedStream = false;
             let metaChanged = false;
 
-            // Fetch detail page to see if website has new or replaced watch_embed / player_2 stream links
-            const detailHtml = await this.fetchDetailPage(item.pageUrl);
-
-            if (detailHtml) {
-              const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
-              if (parsed.streams) {
-                const newEmbed = (parsed.streams.watch_embed || '').trim();
-                const newRaw = (parsed.streams.watch_raw || '').trim();
-                const newPlayer2 = (parsed.streams.player_2 || '').trim();
-                const newM3u8 = (parsed.streams.m3u8_url || '').trim();
-                const newPlayer2M3u8 = (parsed.streams.player_2_m3u8_url || '').trim();
-
-                const oldEmbed = (inMovie.streams?.watch_embed || '').trim();
-                const oldRaw = (inMovie.streams?.watch_raw || '').trim();
-                const oldPlayer2 = (inMovie.streams?.player_2 || '').trim();
-                const oldM3u8 = (inMovie.streams?.m3u8_url || '').trim();
-                const oldP2M3u8 = (inMovie.streams?.player_2_m3u8_url || '').trim();
-
-                const embedChanged = Boolean(newEmbed && newEmbed !== oldEmbed);
-                const player2Changed = Boolean(newPlayer2 && newPlayer2 !== oldPlayer2);
-                const rawChanged = Boolean(newRaw && newRaw !== oldRaw);
-                const m3u8Changed = Boolean(newM3u8 && newM3u8 !== oldM3u8);
-                const p2M3u8Changed = Boolean(newPlayer2M3u8 && newPlayer2M3u8 !== oldP2M3u8);
-
-                const isChanged = embedChanged || player2Changed || rawChanged || m3u8Changed || p2M3u8Changed;
-
-                if (isChanged) {
-                  if (!inMovie.streams) {
-                    inMovie.streams = {};
-                  }
-                  // Replace previous watch_embed link with the new link if changed or present
-                  if (newEmbed) {
-                    inMovie.streams.watch_embed = newEmbed;
-                    // If watch_embed was replaced, reset old stale m3u8 and set new one if available
-                    if (embedChanged) {
-                      inMovie.streams.m3u8_url = newM3u8 || '';
-                    }
-                  }
-                  // Replace previous player_2 link with the new link if changed or present
-                  if (newPlayer2) {
-                    inMovie.streams.player_2 = newPlayer2;
-                    if (player2Changed) {
-                      inMovie.streams.player_2_m3u8_url = newPlayer2M3u8 || '';
-                    }
-                  }
-                  if (newRaw) {
-                    inMovie.streams.watch_raw = newRaw;
-                  }
-                  if (!embedChanged && newM3u8) {
-                    inMovie.streams.m3u8_url = newM3u8;
-                  }
-                  if (!player2Changed && newPlayer2M3u8) {
-                    inMovie.streams.player_2_m3u8_url = newPlayer2M3u8;
-                  }
-
+            // Only fetch detail page if streams are missing or quality upgraded to save 40+ seconds of latency
+            if (!hasWorkingStream || qualityUpgraded) {
+              const detailHtml = await this.fetchDetailPage(item.pageUrl);
+              if (detailHtml) {
+                const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
+                if (parsed.streams && (parsed.streams.watch_embed || parsed.streams.player_2)) {
+                  inMovie.streams = { ...inMovie.streams, ...parsed.streams };
                   inMovie.markModified('streams');
                   updatedStream = true;
+                  updatedMoviesCount++;
+                  this.totalMoviesUpdated++;
                 }
               }
             }
@@ -570,16 +537,7 @@ export class ScraperPipelineService {
             }
 
             if (updatedStream || metaChanged) {
-              inMovie.updatedAt = new Date();
               await inMovie.save();
-
-              if (updatedStream) {
-                updatedMoviesCount++;
-                this.totalMoviesUpdated++;
-                console.log(
-                  `🔄 [UPDATED MOVIE STREAM] ${inMovie.title}: Replaced old stream links with updated links (watch_embed: ${inMovie.streams?.watch_embed}, player_2: ${inMovie.streams?.player_2}) -> Pushed to TOP!`,
-                );
-              }
             } else {
               skippedCount++;
             }
@@ -590,22 +548,25 @@ export class ScraperPipelineService {
 
           // 2. Existing Series in DB
           if (existingSeries) {
+            const hasSeasons = Boolean(existingSeries.seasons && existingSeries.seasons.length > 0);
+            const titleChanged = Boolean(
+              item.fullTitle && existingSeries.full_title && item.fullTitle !== existingSeries.full_title,
+            );
             let updatedSeries = false;
             let metaChanged = false;
 
-            // Fetch detail page to see if website has new episodes or replaced stream links
-            const detailHtml = await this.fetchDetailPage(item.pageUrl);
-            if (detailHtml) {
-              const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
-              if (parsed.type === 'series' && parsed.seasons) {
-                const updatedCount = this.mergeNewEpisodes(existingSeries, parsed.seasons);
-                if (updatedCount > 0) {
-                  existingSeries.markModified('seasons');
-                  updatedEpisodesCount += updatedCount;
-                  updatedSeries = true;
-                  console.log(
-                    `✨ [UPDATED SERIES] ${existingSeries.title}: Replaced stream links for ${updatedCount} episode(s) -> Pushed to TOP!`,
-                  );
+            // Only fetch detail page if seasons are missing or new episodes added to title
+            if (!hasSeasons || titleChanged) {
+              const detailHtml = await this.fetchDetailPage(item.pageUrl);
+              if (detailHtml) {
+                const parsed = await this.parseMovieOrSeries(detailHtml, item.displayName);
+                if (parsed.type === 'series' && parsed.seasons) {
+                  const updatedCount = this.mergeNewEpisodes(existingSeries, parsed.seasons);
+                  if (updatedCount > 0) {
+                    existingSeries.markModified('seasons');
+                    updatedEpisodesCount += updatedCount;
+                    updatedSeries = true;
+                  }
                 }
               }
             }
@@ -624,7 +585,6 @@ export class ScraperPipelineService {
             }
 
             if (updatedSeries || metaChanged) {
-              existingSeries.updatedAt = new Date(); // Push to TOP of series!
               await existingSeries.save();
             } else {
               skippedCount++;
@@ -696,10 +656,41 @@ export class ScraperPipelineService {
         this.latestLiveItems = liveItems;
         this.latestLiveItemsTime = Date.now();
         console.log(`📡 [Scraper Pipeline] Synced ${liveItems.length} latest live releases matching website.`);
-      }
 
-      // If new movies/series or updated stream links were added, invalidate in-memory cache
-      if (newMoviesCount > 0 || updatedMoviesCount > 0 || newSeriesCount > 0 || updatedEpisodesCount > 0) {
+        // Synchronize MongoDB updatedAt timestamps using native collection bulkWrite to preserve exact website order
+        try {
+          const baseTime = Date.now();
+          const movieBulk: any[] = [];
+          const seriesBulk: any[] = [];
+
+          for (let i = 0; i < liveItems.length; i++) {
+            const item = liveItems[i];
+            const targetDate = new Date(baseTime - i * 10000);
+            if ((item.type as any) === 'series' || item.type === 'tv') {
+              seriesBulk.push({
+                updateOne: {
+                  filter: { id: item.id },
+                  update: { $set: { updatedAt: targetDate } },
+                },
+              });
+            } else {
+              movieBulk.push({
+                updateOne: {
+                  filter: { id: item.id },
+                  update: { $set: { updatedAt: targetDate } },
+                },
+              });
+            }
+          }
+
+          if (movieBulk.length > 0) await Movie.collection.bulkWrite(movieBulk);
+          if (seriesBulk.length > 0) await Series.collection.bulkWrite(seriesBulk);
+          console.log(`📌 [Scraper Pipeline] Preserved exact website ordering across ${liveItems.length} items in MongoDB.`);
+        } catch (reorderErr: any) {
+          console.warn('[Scraper Pipeline] Reorder bulkWrite error:', reorderErr.message);
+        }
+
+        // Always invalidate content cache so newest website order is immediately visible
         if (this.contentService) {
           this.contentService.invalidateCache();
         }
