@@ -13,6 +13,12 @@ export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
  */
 export function getHeadersForStreamUrl(url: string): Record<string, string> {
   if (!url) return {};
+  if (url.includes('play4u') || url.includes('uprising')) {
+    return {
+      Referer: 'https://play4u.org/',
+      Origin: 'https://play4u.org',
+    };
+  }
   if (
     url.includes('hubstream') ||
     url.includes('skyline') ||
@@ -30,6 +36,12 @@ export function getHeadersForStreamUrl(url: string): Record<string, string> {
     return {
       Referer: 'https://vidaraa.cc/',
       Origin: 'https://vidaraa.cc',
+    };
+  }
+  if (url.includes('greenmotors')) {
+    return {
+      Referer: 'https://greenmotors.cc/',
+      Origin: 'https://greenmotors.cc',
     };
   }
   if (url.includes('multidownload') || url.includes('multicloudlinks')) {
