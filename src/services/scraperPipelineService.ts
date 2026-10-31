@@ -122,35 +122,32 @@ export class ScraperPipelineService {
   }
 
   async getLatestLiveItems(forceRefresh = false): Promise<MediaItem[]> {
+    // 1. Cold-start recovery: if in-memory cache is empty, restore from ScraperMeta in MongoDB (sub-5ms)
+    if (this.latestLiveItems.length === 0) {
+      try {
+        const meta = await ScraperMeta.findOne({ key: 'global_scraper_status' }).lean();
+        if (
+          meta &&
+          (meta as any).latestLiveItems &&
+          Array.isArray((meta as any).latestLiveItems) &&
+          (meta as any).latestLiveItems.length > 0
+        ) {
+          this.latestLiveItems = (meta as any).latestLiveItems;
+          this.latestLiveItemsTime = meta.lastRunAt ? new Date(meta.lastRunAt).getTime() : Date.now();
+        }
+      } catch {
+        // Ignore DB read failure, return whatever memory holds
+      }
+    }
+
+    // 2. Check if cache is genuinely older than 10 minutes
     const isStale = Date.now() - this.latestLiveItemsTime >= this.INTERVAL_MS;
 
-    // Run scraper pipeline asynchronously in background if stale or force-refreshed, never blocking feed requests
+    // 3. Trigger background scraper only if actually stale, never blocking user feed requests
     if ((isStale || forceRefresh) && !this.isRunning) {
-      this.runPipeline({ maxPages: 2 }).catch((err) => {
+      this.runPipeline({ maxPages: 1 }).catch((err) => {
         console.warn('[Scraper Pipeline] Background refresh failed:', err?.message || err);
       });
-    }
-
-    // Fast return from memory if available
-    if (this.latestLiveItems.length > 0) {
-      return this.latestLiveItems;
-    }
-
-    // Fast cold-start recovery from persisted MongoDB ScraperMeta (sub-10ms)
-    try {
-      const meta = await ScraperMeta.findOne({ key: 'global_scraper_status' }).lean();
-      if (
-        meta &&
-        (meta as any).latestLiveItems &&
-        Array.isArray((meta as any).latestLiveItems) &&
-        (meta as any).latestLiveItems.length > 0
-      ) {
-        this.latestLiveItems = (meta as any).latestLiveItems;
-        this.latestLiveItemsTime = meta.lastRunAt ? new Date(meta.lastRunAt).getTime() : Date.now();
-        return this.latestLiveItems;
-      }
-    } catch {
-      // Ignore DB read failure, return whatever memory holds
     }
 
     return this.latestLiveItems;
@@ -343,10 +340,38 @@ export class ScraperPipelineService {
    * 3. Brand-new releases are parsed & inserted at top of feed (createdAt/updatedAt = now).
    * 4. Invalidates in-memory cache and persists execution metrics to MongoDB.
    */
-  async runPipeline(options?: { maxPages?: number }): Promise<ScraperStatus['lastRunResult']> {
+  async runPipeline(options?: { maxPages?: number; force?: boolean }): Promise<ScraperStatus['lastRunResult']> {
     if (this.isRunning) {
-      console.log('⏳ Scraper pipeline is already running. Skipping overlapping execution.');
+      console.log('⏳ Scraper pipeline is already running in this instance. Skipping overlapping execution.');
       return this.lastRunResult;
+    }
+
+    // Atomic distributed lock in MongoDB: ensures only ONE Vercel instance runs the scraper every 10 minutes
+    if (!options?.force) {
+      try {
+        const tenMinsAgo = new Date(Date.now() - this.INTERVAL_MS);
+        const lockClaim = await ScraperMeta.findOneAndUpdate(
+          {
+            key: 'global_scraper_status',
+            $or: [
+              { lastRunAt: { $lt: tenMinsAgo } },
+              { lastRunAt: null },
+              { lastRunAt: { $exists: false } },
+            ],
+          },
+          {
+            $set: { lastRunAt: new Date() },
+          },
+          { returnDocument: 'after' },
+        );
+
+        if (!lockClaim) {
+          console.log('📌 [Scraper Pipeline] Another instance recently ran or is running. Skipping to conserve resources.');
+          return this.lastRunResult;
+        }
+      } catch (lockErr: any) {
+        console.warn('[Scraper Pipeline] Distributed lock check warning:', lockErr.message);
+      }
     }
 
     this.isRunning = true;
@@ -362,7 +387,7 @@ export class ScraperPipelineService {
     let skippedCount = 0;
 
     try {
-      const maxPages = options?.maxPages && options.maxPages > 1 ? options.maxPages : 2;
+      const maxPages = options?.maxPages && options.maxPages >= 1 ? options.maxPages : 1;
       const pagesToScan: string[] = [`${this.baseUrl}/`];
       for (let p = 2; p <= maxPages; p++) {
         pagesToScan.push(`${this.baseUrl}/page/${p}/`);
