@@ -15,11 +15,14 @@ export async function proxyStream(req: Request, res: Response) {
         (req.headers['user-agent'] as string) ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
     };
-    if (referer) {
-      headers['Referer'] = referer;
-    } else if (targetUrl.includes('neopulse') || targetUrl.includes('playdrive')) {
+    if (targetUrl.includes('neopulse') || targetUrl.includes('playdrive')) {
       headers['Referer'] = 'https://playdrive.vip/';
       headers['Origin'] = 'https://playdrive.vip';
+    } else if (targetUrl.includes('uprising') || targetUrl.includes('play4u')) {
+      headers['Referer'] = 'https://play4u.org/';
+      headers['Origin'] = 'https://play4u.org';
+    } else if (referer) {
+      headers['Referer'] = referer;
     }
 
     if (req.headers.range) {

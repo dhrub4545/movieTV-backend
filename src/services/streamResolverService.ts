@@ -644,14 +644,6 @@ export class StreamResolverService {
         headers: getHeadersForStreamUrl(streams.m3u8_url),
       });
     } else if (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8)) {
-      const isHls = streams.m3u8_url.includes('.m3u8');
-      sources.push({
-        quality: isHls ? '🎬 Server 1: Primary Stream (Direct HLS)' : '🎬 Server 1: Primary Stream (Direct Stream)',
-        url: streams.m3u8_url.trim(),
-        format: isHls ? 'hls' : 'mp4',
-        headers: getHeadersForStreamUrl(streams.m3u8_url),
-      });
-    } else if (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8)) {
       const isHls = livePlayer2M3u8.includes('.m3u8');
       sources.push({
         quality: isHls ? '🎬 Server 1: Primary Stream (Live HLS)' : '🎬 Server 1: Primary Stream (Live Stream)',
@@ -754,15 +746,11 @@ export class StreamResolverService {
     );
 
     const effectiveWatchEmbedUrl = streams && streams.watch_embed
-      ? (isPlaydriveStream1 && p1Hls)
-        ? p1Hls
-        : normalizeStreamUrl(streams.watch_embed)
+      ? normalizeStreamUrl(streams.watch_embed)
       : undefined;
 
     const effectivePlayer2Url = streams && streams.player_2
-      ? (isPlaydriveStream2 && livePlayer2M3u8)
-        ? livePlayer2M3u8
-        : normalizeStreamUrl(streams.player_2)
+      ? normalizeStreamUrl(streams.player_2)
       : undefined;
 
     const result: StreamResolveResponse = {

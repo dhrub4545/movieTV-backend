@@ -357,7 +357,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
 
     // 1b. Direct sealed string check if __PA_PLAY__ JSON parse was partial or different variable
     if (!foundM3u8) {
-      const directSealMatch = html.match(/["'](pa!~[A-Za-z0-9_-]+)["']/);
+      const directSealMatch = html.match(/["'](pa!~[A-Za-z0-9_+\/=-]+)["']/);
       if (directSealMatch) {
         const sealKeyMatch = html.match(/window\.__PA_SEAL_KEY__\s*=\s*["']([^"']+)["']/);
         const sealKey = sealKeyMatch ? sealKeyMatch[1] : 'pa4u-stream-seal-v1';
@@ -370,9 +370,9 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
       }
     }
 
-    // 2. Play4u / uprising direct range image stream
+    // 2. Play4u / uprising / playdrive direct range image stream
     if (!foundM3u8) {
-      const uprisingMatch = html.match(/https?:\/\/[^\s"'<>]+\/range\/[a-zA-Z0-9_-]+\.png[^\s"'<>]*/i);
+      const uprisingMatch = html.match(/https?:\/\/[^\s"'<>]+\/range\/[a-zA-Z0-9_-]+\.(?:png|jpe?g|webp)[^\s"'<>]*/i);
       if (uprisingMatch) {
         const uUrl = uprisingMatch[0];
         foundM3u8 = `${uUrl}${uUrl.includes('?') ? '&' : '?'}ext=.m3u8`;
