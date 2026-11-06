@@ -2,11 +2,11 @@ import axios from 'axios';
 import mongoose from 'mongoose';
 import { Movie, Series } from '../db';
 import { StreamResolveResponse, StreamSource, SubtitleTrack } from '../types';
-import { extractDirectM3u8, unpackDeanEdwards } from './m3u8Extractor';
+import { extractDirectM3u8, unpackDeanEdwards, unsealPaUrl } from './m3u8Extractor';
 import { scraperPipelineService } from './scraperPipelineService';
 import { resolveGreenmotors } from './greenmotorsResolver';
 
-export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors };
+export { extractDirectM3u8, unpackDeanEdwards, resolveGreenmotors, unsealPaUrl };
 
 /**
  * Checks if a stream URL is reachable and does not return HTTP 403 Forbidden.
@@ -50,6 +50,12 @@ export function getHeadersForStreamUrl(url: string): Record<string, string> {
       Origin: 'https://new.multicloudlinks.com',
     };
   }
+  if (url.includes('neopulse') || url.includes('playdrive')) {
+    return {
+      Referer: 'https://playdrive.vip/',
+      Origin: 'https://playdrive.vip',
+    };
+  }
   return {
     Referer: 'https://hdstream4u.com/',
     Origin: 'https://hdstream4u.com',
@@ -89,6 +95,7 @@ export async function isStreamUrlAlive(url: string, timeoutMs: number = 3000): P
  */
 export function isM3u8TokenValid(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
+  if (url.includes('pa!~')) return false;
   if (url.includes('asn=14618')) return false;
   if (url.includes('&asn=&') || url.endsWith('&asn=')) return false;
   const nowSec = Math.floor(Date.now() / 1000);
@@ -140,7 +147,7 @@ export async function saveDirectM3u8(params: {
   player?: 1 | 2;
 }): Promise<boolean> {
   const { id, title, type = 'movie', season = 1, episode = 1, m3u8Url, player = 1 } = params;
-  if (!m3u8Url || typeof m3u8Url !== 'string') return false;
+  if (!m3u8Url || typeof m3u8Url !== 'string' || m3u8Url.includes('pa!~')) return false;
 
   // Player 2 uses dynamic live M3U8 on-the-fly and is never stored in DB
   if (player === 2) {
@@ -267,7 +274,7 @@ export class StreamResolverService {
     const cacheKey = `${id || ''}-${title || ''}-${type}-${season}-${episode}`;
 
     const isDirectStream = (url: string) => {
-      if (!url) return false;
+      if (!url || url.includes('pa!~')) return false;
       return (
         url.includes('.m3u8') ||
         url.includes('action=watch') ||
@@ -408,13 +415,14 @@ export class StreamResolverService {
           const hasDbValidM3u8 = Boolean(
             streams.m3u8_url &&
             streams.m3u8_url.includes('.m3u8') &&
+            !streams.m3u8_url.includes('pa!~') &&
             isM3u8TokenValid(streams.m3u8_url)
           );
 
           if (!hasDbValidM3u8 && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
             try {
               const extracted = await extractDirectM3u8(streams.watch_embed);
-              if (extracted && !extracted.includes('asn=14618')) {
+              if (extracted && !extracted.includes('asn=14618') && !extracted.includes('pa!~')) {
                 livePlayer1M3u8 = extracted;
                 streams.m3u8_url = livePlayer1M3u8;
                 saveDirectM3u8({
@@ -433,7 +441,8 @@ export class StreamResolverService {
           // SERVER 2: Live .m3u8 extraction on-the-fly (NEVER saved to DB)
           if (streams.player_2 && streams.player_2 !== '#') {
             try {
-              livePlayer2M3u8 = await extractDirectM3u8(streams.player_2);
+              const p2Ext = await extractDirectM3u8(streams.player_2);
+              if (p2Ext && !p2Ext.includes('pa!~')) livePlayer2M3u8 = p2Ext;
             } catch (extErr: any) {
               console.warn('On-the-fly Player 2 live extraction error:', extErr.message);
             }
@@ -547,13 +556,14 @@ export class StreamResolverService {
             const hasSeriesDbValidM3u8 = Boolean(
               streams.m3u8_url &&
               streams.m3u8_url.includes('.m3u8') &&
+              !streams.m3u8_url.includes('pa!~') &&
               isM3u8TokenValid(streams.m3u8_url)
             );
 
             if (!hasSeriesDbValidM3u8 && streams.watch_embed && streams.watch_embed !== '#' && streams.watch_embed.startsWith('http')) {
               try {
                 const sExtracted = await extractDirectM3u8(streams.watch_embed);
-                if (sExtracted && !sExtracted.includes('asn=14618')) {
+                if (sExtracted && !sExtracted.includes('asn=14618') && !sExtracted.includes('pa!~')) {
                   livePlayer1M3u8 = sExtracted;
                   streams.m3u8_url = livePlayer1M3u8;
                   saveDirectM3u8({
@@ -574,7 +584,8 @@ export class StreamResolverService {
             // SERVER 2 for Series: Live M3U8 extraction on-the-fly (NOT saved to DB)
             if (streams.player_2 && streams.player_2 !== '#') {
               try {
-                livePlayer2M3u8 = await extractDirectM3u8(streams.player_2);
+                const sP2Ext = await extractDirectM3u8(streams.player_2);
+                if (sP2Ext && !sP2Ext.includes('pa!~')) livePlayer2M3u8 = sP2Ext;
               } catch (extErr: any) {
                 console.warn('On-the-fly Player 2 live extraction error for episode:', extErr.message);
               }
@@ -735,14 +746,33 @@ export class StreamResolverService {
       },
     ];
 
+    const isPlaydriveStream1 = Boolean(
+      streams?.watch_embed && (streams.watch_embed.includes('playdrive') || streams.watch_embed.includes('neopulse'))
+    );
+    const isPlaydriveStream2 = Boolean(
+      streams?.player_2 && (streams.player_2.includes('playdrive') || streams.player_2.includes('neopulse'))
+    );
+
+    const effectiveWatchEmbedUrl = streams && streams.watch_embed
+      ? (isPlaydriveStream1 && p1Hls)
+        ? p1Hls
+        : normalizeStreamUrl(streams.watch_embed)
+      : undefined;
+
+    const effectivePlayer2Url = streams && streams.player_2
+      ? (isPlaydriveStream2 && livePlayer2M3u8)
+        ? livePlayer2M3u8
+        : normalizeStreamUrl(streams.player_2)
+      : undefined;
+
     const result: StreamResolveResponse = {
       title: targetTitle,
       type,
       sources,
       m3u8_url: livePlayer1M3u8 && isDirectStream(livePlayer1M3u8) ? livePlayer1M3u8.trim() : (streams && streams.m3u8_url && isDirectStream(streams.m3u8_url) ? streams.m3u8_url.trim() : (livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined)),
       player_2_m3u8_url: livePlayer2M3u8 && isDirectStream(livePlayer2M3u8) ? livePlayer2M3u8.trim() : undefined,
-      watch_embed_url: streams && streams.watch_embed ? normalizeStreamUrl(streams.watch_embed) : undefined,
-      player_2_url: streams && streams.player_2 ? normalizeStreamUrl(streams.player_2) : undefined,
+      watch_embed_url: effectiveWatchEmbedUrl,
+      player_2_url: effectivePlayer2Url,
       subtitles,
     };
 

@@ -17,6 +17,13 @@ export async function proxyStream(req: Request, res: Response) {
     };
     if (referer) {
       headers['Referer'] = referer;
+    } else if (targetUrl.includes('neopulse') || targetUrl.includes('playdrive')) {
+      headers['Referer'] = 'https://playdrive.vip/';
+      headers['Origin'] = 'https://playdrive.vip';
+    }
+
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range as string;
     }
 
     const response = await axios({
@@ -41,7 +48,14 @@ export async function proxyStream(req: Request, res: Response) {
     if (response.headers['content-type']) {
       res.setHeader('Content-Type', String(response.headers['content-type']));
     }
+    if (response.headers['content-range']) {
+      res.setHeader('Content-Range', String(response.headers['content-range']));
+    }
+    if (response.headers['accept-ranges']) {
+      res.setHeader('Accept-Ranges', String(response.headers['accept-ranges']));
+    }
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(response.status);
 
     response.data.pipe(res);
   } catch (err: any) {

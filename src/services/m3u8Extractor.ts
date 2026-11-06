@@ -34,6 +34,39 @@ export function unpackDeanEdwards(packed: string): string {
   }
 }
 
+function xorDecrypt(d: string, k: string): string {
+  let o = '';
+  for (let i = 0; i < d.length; i++) {
+    o += String.fromCharCode(d.charCodeAt(i) ^ k.charCodeAt(i % k.length));
+  }
+  return o;
+}
+
+function base64DecodeLatin1(s: string): string {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  const p = s.length % 4;
+  if (p) s += '===='.slice(p);
+  return Buffer.from(s, 'base64').toString('latin1');
+}
+
+/**
+ * Unseals obfuscated URLs (e.g. pa!~... strings from Playdrive, Play4u, Neopulse, and clones)
+ */
+export function unsealPaUrl(u: string, key: string = 'pa4u-stream-seal-v1'): string {
+  if (!u || typeof u !== 'string') return '';
+  u = u.trim();
+  const P = 'pa!~';
+  if (u.startsWith(P)) {
+    try {
+      const raw = base64DecodeLatin1(u.slice(P.length));
+      return xorDecrypt(raw, key);
+    } catch {
+      return '';
+    }
+  }
+  return u;
+}
+
 function getHubstreamKey(): Buffer {
   const p = 'https:';
   const L = '10';
@@ -183,7 +216,7 @@ export async function extractVidaraaM3u8(url: string): Promise<string | null> {
 }
 
 /**
- * Extracts the direct .m3u8 or progressive video streaming link from an embed URL (e.g. hdstream4u, greenmotors, hubstream, multicloudlinks, vidaraa, etc.)
+ * Extracts the direct .m3u8 or progressive video streaming link from an embed URL (e.g. hdstream4u, greenmotors, hubstream, multicloudlinks, vidaraa, playdrive, etc.)
  */
 export async function extractDirectM3u8(url: string): Promise<string | null> {
   if (!url || typeof url !== 'string') return null;
@@ -194,14 +227,15 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
     targetUrl = targetUrl.replace('hdstrram4u.com', 'hdstream4u.com');
   }
 
-  // If already a direct media stream or progressive file URL, return immediately
+  // If already a direct media stream or progressive file URL, return immediately (unless it's an unsealed pa!~ string)
   if (
-    targetUrl.includes('.m3u8') ||
-    targetUrl.includes('action=watch') ||
-    targetUrl.includes('multidownload.lol') ||
-    targetUrl.includes('uprising.best') ||
-    targetUrl.endsWith('.mp4') ||
-    targetUrl.endsWith('.mkv')
+    !targetUrl.includes('pa!~') &&
+    (targetUrl.includes('.m3u8') ||
+      targetUrl.includes('action=watch') ||
+      targetUrl.includes('multidownload.lol') ||
+      targetUrl.includes('uprising.best') ||
+      targetUrl.endsWith('.mp4') ||
+      targetUrl.endsWith('.mkv'))
   ) {
     return targetUrl;
   }
@@ -246,14 +280,22 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
     }
   }
 
-  // 3. HTTP page fetching & Dean Edwards / streamSrc / Regex extraction
+  // 3. HTTP page fetching & Dean Edwards / streamSrc / Playdrive / Regex extraction
   try {
     const origin = new URL(targetUrl).origin;
+    let reqReferer = origin + '/';
+    let reqOrigin = origin;
+    if (targetUrl.includes('playdrive') || targetUrl.includes('neopulse')) {
+      reqReferer = 'https://playdrive.vip/';
+      reqOrigin = 'https://playdrive.vip';
+    }
+
     const resp = await axios.get(targetUrl, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        Referer: origin + '/',
+        Referer: reqReferer,
+        Origin: reqOrigin,
       },
       timeout: 10000,
       httpsAgent: insecureAgent,
@@ -263,18 +305,69 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
 
     let foundM3u8: string | null = null;
 
-        // 1. window.__PA_PLAY__ (Play4u or clones)
+    // 1. window.__PA_PLAY__ or window.__PA_SERIES__ (Playdrive, Play4u, Neopulse, and clones)
     const paMatch = html.match(/window\.__PA_PLAY__\s*=\s*(\{[\s\S]*?\});/);
-    if (paMatch) {
+    const paSeriesMatch = !paMatch ? html.match(/window\.__PA_SERIES__\s*=\s*(\{[\s\S]*?\});/) : null;
+    const targetPaMatch = paMatch || paSeriesMatch;
+
+    if (targetPaMatch) {
       try {
-        const paData = JSON.parse(paMatch[1]);
-        const streamUrl = paData?.streams?.[0]?.m3u8_url || paData?.item?.video_url;
-        if (streamUrl) {
-          foundM3u8 = streamUrl.includes('.m3u8')
-            ? streamUrl
-            : `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}ext=.m3u8`;
+        const sealKeyMatch = html.match(/window\.__PA_SEAL_KEY__\s*=\s*["']([^"']+)["']/);
+        const sealKey = sealKeyMatch ? sealKeyMatch[1] : 'pa4u-stream-seal-v1';
+
+        const paData = JSON.parse(targetPaMatch[1]);
+        const streams = Array.isArray(paData?.streams) ? paData.streams : [];
+        let candidate = '';
+
+        for (const s of streams) {
+          const raw = s?.m3u8_url || s?.video_url;
+          if (raw) {
+            const unsealed = unsealPaUrl(raw, sealKey);
+            if (unsealed) {
+              candidate = unsealed;
+              break;
+            }
+          }
+        }
+
+        if (!candidate && paData?.item?.video_url) {
+          candidate = unsealPaUrl(paData.item.video_url, sealKey);
+        }
+
+        if (!candidate && paData?.episodes && Array.isArray(paData.episodes)) {
+          for (const ep of paData.episodes) {
+            const raw = ep?.m3u8_url || ep?.video_url;
+            if (raw) {
+              const unsealed = unsealPaUrl(raw, sealKey);
+              if (unsealed) {
+                candidate = unsealed;
+                break;
+              }
+            }
+          }
+        }
+
+        if (candidate) {
+          foundM3u8 = candidate.includes('.m3u8')
+            ? candidate
+            : `${candidate}${candidate.includes('?') ? '&' : '?'}ext=.m3u8`;
         }
       } catch {}
+    }
+
+    // 1b. Direct sealed string check if __PA_PLAY__ JSON parse was partial or different variable
+    if (!foundM3u8) {
+      const directSealMatch = html.match(/["'](pa!~[A-Za-z0-9_-]+)["']/);
+      if (directSealMatch) {
+        const sealKeyMatch = html.match(/window\.__PA_SEAL_KEY__\s*=\s*["']([^"']+)["']/);
+        const sealKey = sealKeyMatch ? sealKeyMatch[1] : 'pa4u-stream-seal-v1';
+        const unsealed = unsealPaUrl(directSealMatch[1], sealKey);
+        if (unsealed && (unsealed.startsWith('http://') || unsealed.startsWith('https://'))) {
+          foundM3u8 = unsealed.includes('.m3u8')
+            ? unsealed
+            : `${unsealed}${unsealed.includes('?') ? '&' : '?'}ext=.m3u8`;
+        }
+      }
     }
 
     // 2. Play4u / uprising direct range image stream
@@ -297,7 +390,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
     // B. Direct match in html
     if (!foundM3u8) {
       const directMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-      if (directMatch) foundM3u8 = directMatch[0];
+      if (directMatch && !directMatch[0].includes('pa!~')) foundM3u8 = directMatch[0];
     }
 
     // C. Dean Edwards packed script
@@ -305,7 +398,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
       const unpacked = unpackDeanEdwards(html);
       if (unpacked) {
         const m3u8Match = unpacked.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-        if (m3u8Match) {
+        if (m3u8Match && !m3u8Match[0].includes('pa!~')) {
           foundM3u8 = m3u8Match[0];
         } else {
           const streamMatch = unpacked.match(/\/stream\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
@@ -319,7 +412,7 @@ export async function extractDirectM3u8(url: string): Promise<string | null> {
       }
     }
 
-    if (foundM3u8) {
+    if (foundM3u8 && !foundM3u8.includes('pa!~')) {
       extractionCache.set(url.trim(), { m3u8: foundM3u8, expiresAt: Date.now() + 15 * 60 * 1000 });
       return foundM3u8;
     }

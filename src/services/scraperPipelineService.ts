@@ -1014,6 +1014,8 @@ export class ScraperPipelineService {
             'hubstream',
             'greenmotors',
             'hubcloud',
+            'playdrive',
+            'neopulse',
           ].some((d) => href.includes(d));
           const isWatchOrPlayer1 =
             linkText.includes('WATCH-1') ||
@@ -1147,6 +1149,8 @@ export class ScraperPipelineService {
         'multicloudlinks',
         'dr1.multidownload',
         'play4u',
+        'playdrive',
+        'neopulse',
         'hubcloud',
         'streamtape',
         'vidhide',
