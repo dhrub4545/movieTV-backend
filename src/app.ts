@@ -63,7 +63,7 @@ app.post('/api/crash-report', (req: Request, res: Response) => {
 });
 
 // Instant Mobile Download Endpoint: Download fresh APK directly from mobile phone browser
-app.get('/apk', (_req: Request, res: Response) => {
+app.get(['/apk', '/MovieTV.apk', '/download'], (_req: Request, res: Response) => {
   const localApk = path.resolve(__dirname, '../MovieTV.apk');
   const repoApk = path.resolve(
     __dirname,
@@ -73,6 +73,8 @@ app.get('/apk', (_req: Request, res: Response) => {
 
   const finalApkPath = [localApk, repoApk, rootApk].find((p) => fs.existsSync(p));
   if (finalApkPath) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.download(finalApkPath, 'MovieTV.apk');
   } else {
     res.status(404).send('APK not found. Please build the frontend project first.');
